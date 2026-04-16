@@ -16,6 +16,7 @@ export interface AppConfig {
   paperInitialSol: number;
   paperInitialUsdc: number;
   apiPort: number;
+  apiHost: string;
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -69,4 +70,5 @@ export const config: AppConfig = {
   paperInitialSol: parseFloatEnv('PAPER_INITIAL_SOL', 10),
   paperInitialUsdc: parseFloatEnv('PAPER_INITIAL_USDC', 1000),
   apiPort: parseIntEnv('API_PORT', 3456),
+  apiHost: optionalEnv('API_HOST', '0.0.0.0'),
 };

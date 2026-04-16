@@ -6,14 +6,19 @@ import { getRecentTrades } from './db';
 import { getQuote } from './price';
 import { loadWallet } from './wallet';
 
-const HOST = '127.0.0.1';
+/** Serialize JSON with BigInt support (BigInt → string). */
+function jsonSafe(obj: unknown): string {
+  return JSON.stringify(obj, (_, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
+}
 
 function sendJson(
   res: http.ServerResponse,
   status: number,
   body: unknown,
 ): void {
-  const payload = JSON.stringify(body);
+  const payload = jsonSafe(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(payload),
@@ -39,11 +44,12 @@ function parseJson<T>(raw: string): T {
 
 export function startApiServer(agent: TradingAgent): http.Server {
   const port = config.apiPort;
+  const host = config.apiHost;
   const server = http.createServer((req, res) => {
     void handleRequest(agent, req, res, port);
   });
-  server.listen(port, HOST, () => {
-    console.log(`API server listening on http://${HOST}:${port}`);
+  server.listen(port, host, () => {
+    console.log(`API server listening on http://${host}:${port}`);
   });
   return server;
 }
@@ -66,7 +72,7 @@ async function handleRequest(
   const started = Date.now();
   let logCode = 500;
   const method = (req.method ?? 'GET').toUpperCase();
-  const base = `http://${HOST}:${port}`;
+  const base = `http://127.0.0.1:${port}`;
   const url = new URL(req.url ?? '/', base);
   let pathname = url.pathname;
   if (pathname.length > 1 && pathname.endsWith('/')) {

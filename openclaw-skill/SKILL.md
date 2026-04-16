@@ -1,8 +1,8 @@
 # Solana Trading Agent
 
-You have access to a Solana trading agent running locally on the user’s machine. Interact with it only via HTTP requests to **http://127.0.0.1:3456** (default port; configurable with `API_PORT` in the agent’s `.env`). The server listens on localhost only.
+You have access to a Solana trading agent running on the user’s machine (or VPS). The HTTP API binds to **0.0.0.0** by default (`API_HOST` in `.env`; port `API_PORT`, default **3456**) so other processes (e.g. OpenClaw in Docker) can reach it on the host network. From the **same host** as the agent, use **http://127.0.0.1:3456** (or `http://localhost:3456`). From a **Docker container** on the same machine, use the host gateway (often **http://host.docker.internal:3456** on Docker Desktop) or the host’s LAN IP—**not** `127.0.0.1` inside the container (that is the container itself). The VPS firewall should still block public access to port 3456 if only local/bridge access is intended.
 
-Assume the agent process is already running (`npm start` or equivalent). If a request fails with connection refused, tell the user to start the agent first.
+Assume the agent process is already running (`npm start` or equivalent). If a request fails with connection refused, tell the user to start the agent first and verify `API_HOST` / `API_PORT` and Docker networking.
 
 ## When to use this skill
 
@@ -10,7 +10,7 @@ Use this skill when the user mentions trading, crypto, Solana, Jupiter, their po
 
 ## Available endpoints
 
-Base URL: `http://127.0.0.1:3456`
+Base URL (on the agent host): `http://127.0.0.1:3456` — adjust host/port if the user’s setup uses Docker or a remote host.
 
 Default mints (from the agent’s env): **SOL** `So11111111111111111111111111111111111111112`, **USDC** `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`.
 

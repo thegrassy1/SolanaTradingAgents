@@ -427,13 +427,25 @@ export class TradingAgent {
     sma: number | null;
     volatility: number | null;
     cooldownRemaining: number;
-    paperPortfolio: unknown;
+    paperPortfolio: {
+      balances: Record<string, { human: number; raw: string }>;
+      pnl: {
+        currentValue: number;
+        initialValue: number;
+        pnl: number;
+        pnlPercent: number;
+      };
+    };
     recentTrades: ReturnType<typeof getRecentTrades>;
     tradeSummary: ReturnType<typeof getTradeSummary>;
     uptimeMs: number;
   }> {
     const pnl = await this.paperEngine.getPnL(this.cfg.quoteMint);
     const all = this.paperEngine.getAllBalances();
+    const balancesJson: Record<string, { human: number; raw: string }> = {};
+    for (const [mint, b] of Object.entries(all)) {
+      balancesJson[mint] = { human: b.human, raw: b.raw.toString() };
+    }
     return {
       mode: this.mode,
       running: this.running,
@@ -445,7 +457,7 @@ export class TradingAgent {
         0,
         Math.ceil((this.cooldownUntil - Date.now()) / 1000),
       ),
-      paperPortfolio: { balances: all, pnl },
+      paperPortfolio: { balances: balancesJson, pnl },
       recentTrades: getRecentTrades(5, this.mode),
       tradeSummary: getTradeSummary(this.mode),
       uptimeMs: this.startedAt ? Date.now() - this.startedAt.getTime() : 0,
