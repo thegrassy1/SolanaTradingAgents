@@ -1,6 +1,6 @@
 # Solana Trading Agent
 
-You have access to a Solana trading agent running on the user’s machine (or VPS). The HTTP API binds to **0.0.0.0** by default (`API_HOST` in `.env`; port `API_PORT`, default **3456**) so other processes (e.g. OpenClaw in Docker) can reach it on the host network. From the **same host** as the agent, use **http://127.0.0.1:3456** (or `http://localhost:3456`). From a **Docker container** on the same machine, use the host gateway (often **http://host.docker.internal:3456** on Docker Desktop) or the host’s LAN IP—**not** `127.0.0.1` inside the container (that is the container itself). The VPS firewall should still block public access to port 3456 if only local/bridge access is intended.
+You have access to a Solana trading agent running on the user’s machine (or VPS). The HTTP API binds to **0.0.0.0** by default (`API_HOST` in `.env`; port `API_PORT`, default **3456**) so other processes (e.g. OpenClaw in Docker) can reach it on the host network. From the **same host** as the agent, use **http://172.20.0.1:3456** (or `http://localhost:3456`). From a **Docker container** on the same machine, use the host gateway (often **http://host.docker.internal:3456** on Docker Desktop) or the host’s LAN IP—**not** `127.0.0.1` inside the container (that is the container itself). The VPS firewall should still block public access to port 3456 if only local/bridge access is intended.
 
 Assume the agent process is already running (`npm start` or equivalent). If a request fails with connection refused, tell the user to start the agent first and verify `API_HOST` / `API_PORT` and Docker networking.
 
@@ -10,7 +10,7 @@ Use this skill when the user mentions trading, crypto, Solana, Jupiter, their po
 
 ## Available endpoints
 
-Base URL (on the agent host): `http://127.0.0.1:3456` — adjust host/port if the user’s setup uses Docker or a remote host.
+Base URL (on the agent host): `http://172.20.0.1:3456` — adjust host/port if the user’s setup uses Docker or a remote host.
 
 Default mints (from the agent’s env): **SOL** `So11111111111111111111111111111111111111112`, **USDC** `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`.
 
@@ -19,7 +19,7 @@ Default mints (from the agent’s env): **SOL** `So11111111111111111111111111111
 Liveness: `{ ok, uptime (seconds), mode, running }`.
 
 ```bash
-curl -s http://127.0.0.1:3456/health
+curl -s http://172.20.0.1:3456/health
 ```
 
 ### GET /status
@@ -27,7 +27,7 @@ curl -s http://127.0.0.1:3456/health
 Full agent status (same shape as `TradingAgent.getStatus()`): mode, running, latest price, SMA, volatility, cooldown, paper portfolio balances and P&L, recent trades, trade summary, uptime.
 
 ```bash
-curl -s http://127.0.0.1:3456/status
+curl -s http://172.20.0.1:3456/status
 ```
 
 ### GET /quote
@@ -39,7 +39,7 @@ Response JSON: `inputMint`, `outputMint`, `inAmount`, `outAmount`, `priceImpact`
 Example (quote 0.01 SOL → USDC, amount = 10_000_000 lamports):
 
 ```bash
-curl -s "http://127.0.0.1:3456/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=10000000"
+curl -s "http://172.20.0.1:3456/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=10000000"
 ```
 
 ### POST /trade
@@ -55,11 +55,11 @@ Body JSON:
 Success: HTTP **200** and a `TradeRecord` JSON (status `paper_filled` or `success`). Failure: HTTP **400** (or **500**) and JSON may include `error` on server faults; failed trades may still return a `TradeRecord` with `status: "failed"`.
 
 ```bash
-curl -s -X POST http://127.0.0.1:3456/trade -H "Content-Type: application/json" -d "{\"direction\":\"buy\",\"amount\":50}"
+curl -s -X POST http://172.20.0.1:3456/trade -H "Content-Type: application/json" -d "{\"direction\":\"buy\",\"amount\":50}"
 ```
 
 ```bash
-curl -s -X POST http://127.0.0.1:3456/trade -H "Content-Type: application/json" -d "{\"direction\":\"sell\",\"amount\":0.25}"
+curl -s -X POST http://172.20.0.1:3456/trade -H "Content-Type: application/json" -d "{\"direction\":\"sell\",\"amount\":0.25}"
 ```
 
 ### GET /history
@@ -67,7 +67,7 @@ curl -s -X POST http://127.0.0.1:3456/trade -H "Content-Type: application/json" 
 Recent rows from SQLite `trades`. Query: **limit** (default 20, max 500), optional **mode** `paper` or `live`.
 
 ```bash
-curl -s "http://127.0.0.1:3456/history?limit=10&mode=paper"
+curl -s "http://172.20.0.1:3456/history?limit=10&mode=paper"
 ```
 
 ### GET /pnl
@@ -75,7 +75,7 @@ curl -s "http://127.0.0.1:3456/history?limit=10&mode=paper"
 Paper engine P&L vs quote mint (USDC): `currentValue`, `initialValue`, `pnl`, `pnlPercent`.
 
 ```bash
-curl -s http://127.0.0.1:3456/pnl
+curl -s http://172.20.0.1:3456/pnl
 ```
 
 ### POST /mode
@@ -83,7 +83,7 @@ curl -s http://127.0.0.1:3456/pnl
 Switch trading mode. Body: `{ "mode": "paper" | "live" }`. Switching to **live** without a configured wallet returns **400**.
 
 ```bash
-curl -s -X POST http://127.0.0.1:3456/mode -H "Content-Type: application/json" -d "{\"mode\":\"paper\"}"
+curl -s -X POST http://172.20.0.1:3456/mode -H "Content-Type: application/json" -d "{\"mode\":\"paper\"}"
 ```
 
 ### POST /config
@@ -91,7 +91,7 @@ curl -s -X POST http://127.0.0.1:3456/mode -H "Content-Type: application/json" -
 Update runtime settings (same keys as the agent’s `setRuntimeConfig`): e.g. `trade_amount` / `trade_amount_lamports`, `threshold` (mean-reversion percent), `cooldown` (minutes). Body: `{ "key": "...", "value": "..." }`. Cannot set `mode` here (use POST /mode).
 
 ```bash
-curl -s -X POST http://127.0.0.1:3456/config -H "Content-Type: application/json" -d "{\"key\":\"threshold\",\"value\":\"3\"}"
+curl -s -X POST http://172.20.0.1:3456/config -H "Content-Type: application/json" -d "{\"key\":\"threshold\",\"value\":\"3\"}"
 ```
 
 ### POST /reset
@@ -99,7 +99,7 @@ curl -s -X POST http://127.0.0.1:3456/config -H "Content-Type: application/json"
 Reset the **paper** portfolio to initial balances. Response: `{ message, balances }`.
 
 ```bash
-curl -s -X POST http://127.0.0.1:3456/reset
+curl -s -X POST http://172.20.0.1:3456/reset
 ```
 
 ## How to respond
