@@ -6,7 +6,9 @@ import {
   logTrade,
 } from './db';
 import { PaperTradingEngine } from './paper';
+import { PositionManager } from './positions';
 import { calculatePrice, getQuote, PriceMonitor } from './price';
+import { RiskManager, type TradeOutcome } from './risk';
 import { swap } from './swap';
 import type { TradeRecord } from './types';
 import { getTokenDecimals } from './tokenInfo';
@@ -23,16 +25,20 @@ export class TradingAgent {
   private readonly cfg: AppConfig;
   readonly priceMonitor: PriceMonitor;
   readonly paperEngine: PaperTradingEngine;
+  readonly positionManager: PositionManager;
+  readonly riskManager: RiskManager;
   private running = false;
   mode: 'paper' | 'live';
   private cooldownUntil = 0;
-  readonly COOLDOWN_MS = 5 * 60 * 1000;
   private liveVirtualSol: bigint;
   private liveVirtualUsdc: bigint;
   private startedAt: Date | null = null;
   private thresholdPct = 2;
-  private cooldownMs = this.COOLDOWN_MS;
   private tradeAmountLamports: number;
+  private dailyDateKeyUtc: string;
+  private dailyStartingValueQuote = 0;
+  private dailyRealizedPnL = 0;
+  private lastTradeResult: TradeOutcome = null;
 
   constructor(cfg: AppConfig) {
     this.cfg = cfg;
@@ -40,6 +46,7 @@ export class TradingAgent {
     this.tradeAmountLamports = cfg.tradeAmountLamports;
     this.liveVirtualSol = BigInt(Math.round(cfg.paperInitialSol * 1e9));
     this.liveVirtualUsdc = BigInt(Math.round(cfg.paperInitialUsdc * 1e6));
+    this.dailyDateKeyUtc = new Date().toISOString().slice(0, 10);
     this.paperEngine = new PaperTradingEngine(
       {
         [SOL]: cfg.paperInitialSol,
@@ -53,6 +60,8 @@ export class TradingAgent {
       cfg.tradeAmountLamports,
       cfg.pollIntervalMs,
     );
+    this.positionManager = new PositionManager();
+    this.riskManager = new RiskManager(cfg);
   }
 
   start(): void {
@@ -125,6 +134,27 @@ export class TradingAgent {
     return calculatePrice(q, din, dout);
   }
 
+  private async portfolioValueQuote(): Promise<number> {
+    const { totalValue } = await this.paperEngine.getPortfolioValue(
+      this.cfg.quoteMint,
+    );
+    return totalValue;
+  }
+
+  private async ensureDailyNav(): Promise<void> {
+    const key = new Date().toISOString().slice(0, 10);
+    if (this.dailyDateKeyUtc !== key) {
+      this.dailyDateKeyUtc = key;
+      this.dailyStartingValueQuote = await this.portfolioValueQuote();
+      this.dailyRealizedPnL = 0;
+      console.log(
+        `[AGENT] UTC day ${key}: daily NAV baseline=${this.dailyStartingValueQuote.toFixed(2)}`,
+      );
+    } else if (this.dailyStartingValueQuote <= 0) {
+      this.dailyStartingValueQuote = await this.portfolioValueQuote();
+    }
+  }
+
   private capInputRaw(inputMint: string, raw: bigint): bigint {
     const paperBal = this.paperEngine.getBalance(inputMint).raw;
     if (this.mode === 'paper') {
@@ -150,6 +180,7 @@ export class TradingAgent {
     inputRaw: bigint,
     priceSolUsdc: number,
     strategy: string,
+    options?: { skipLog?: boolean; logExtras?: Partial<TradeRecord> },
   ): Promise<TradeRecord> {
     if (inputRaw <= 0n) {
       const rec: TradeRecord = {
@@ -164,8 +195,9 @@ export class TradingAgent {
         strategy,
         errorMessage: 'Amount must be positive',
         priceAtTrade: priceSolUsdc,
+        ...options?.logExtras,
       };
-      logTrade(rec);
+      if (!options?.skipLog) logTrade(rec);
       return rec;
     }
 
@@ -178,7 +210,8 @@ export class TradingAgent {
           strategy,
         );
         rec.priceAtTrade = priceSolUsdc;
-        logTrade(rec);
+        Object.assign(rec, options?.logExtras);
+        if (!options?.skipLog) logTrade(rec);
         return rec;
       }
 
@@ -199,8 +232,9 @@ export class TradingAgent {
         strategy,
         slippageBps: order.slippageBps,
         priceAtTrade: priceSolUsdc,
+        ...options?.logExtras,
       };
-      logTrade(rec);
+      if (!options?.skipLog) logTrade(rec);
       if (ok && this.isSolUsdcPair(inputMint, outputMint)) {
         await this.paperEngine.executePaperTrade(
           inputMint,
@@ -237,23 +271,72 @@ export class TradingAgent {
         strategy,
         errorMessage: msg,
         priceAtTrade: priceSolUsdc,
+        ...options?.logExtras,
       };
-      logTrade(failed);
+      if (!options?.skipLog) logTrade(failed);
       return failed;
     }
   }
 
-  private applyCooldownIfFilled(rec: TradeRecord): void {
-    if (rec.status === 'paper_filled' || rec.status === 'success') {
-      this.cooldownUntil = Date.now() + this.cooldownMs;
-      console.log(
-        `[AGENT] Trade executed. Cooldown until ${new Date(this.cooldownUntil).toISOString()}`,
+  private armCooldown(outcome: TradeOutcome): void {
+    const ms = this.riskManager.getCooldownMs(outcome);
+    this.cooldownUntil = Date.now() + ms;
+    console.log(
+      `[AGENT] Cooldown ${(ms / 60000).toFixed(1)}m until ${new Date(this.cooldownUntil).toISOString()}`,
+    );
+  }
+
+  private async processRiskExits(currentPrice: number): Promise<void> {
+    this.positionManager.updateHighWaterMarks(currentPrice);
+    const signals = this.positionManager.checkExits(currentPrice);
+    for (const sig of signals) {
+      const pos = this.positionManager
+        .getOpenPositions()
+        .find((p) => p.id === sig.positionId);
+      if (!pos) continue;
+      const rec = await this.executeSwapLeg(
+        SOL,
+        USDC,
+        sig.amount,
+        currentPrice,
+        `risk_exit_${sig.reason}`,
+        { skipLog: true },
       );
+      if (rec.status !== 'paper_filled' && rec.status !== 'success') continue;
+      const closed = this.positionManager.closePosition(
+        sig.positionId,
+        currentPrice,
+        sig.reason,
+      );
+      this.dailyRealizedPnL += closed.realizedPnlQuote;
+      this.lastTradeResult =
+        closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+      logTrade({
+        timestamp: rec.timestamp,
+        inputMint: rec.inputMint,
+        outputMint: rec.outputMint,
+        inputAmount: rec.inputAmount,
+        outputAmount: rec.outputAmount,
+        expectedOutput: rec.expectedOutput,
+        txSignature: rec.txSignature,
+        status: rec.status,
+        priceImpact: rec.priceImpact,
+        mode: rec.mode,
+        strategy: rec.strategy,
+        slippageBps: rec.slippageBps,
+        priceAtTrade: currentPrice,
+        entryPrice: pos.entryPrice,
+        exitPrice: currentPrice,
+        exitReason: sig.reason,
+        realizedPnl: closed.realizedPnlQuote,
+      });
+      this.armCooldown(this.lastTradeResult);
     }
   }
 
   /**
-   * Public API: execute a single swap (amount is human units of the input token).
+   * Public API: manual trade (OpenClaw / POST /trade). Respects daily circuit breaker,
+   * max positions, and cooldown (except closing a tracked position via sell).
    */
   async executeTrade(params: {
     direction: 'buy' | 'sell';
@@ -261,7 +344,8 @@ export class TradingAgent {
     inputMint?: string;
     outputMint?: string;
   }): Promise<TradeRecord> {
-    const strategy = 'api';
+    const strategy = 'manual';
+    await this.ensureDailyNav();
     const priceSolUsdc = await this.resolvePriceSolUsdc();
     const inputMint =
       params.inputMint ??
@@ -269,6 +353,32 @@ export class TradingAgent {
     const outputMint =
       params.outputMint ??
       (params.direction === 'buy' ? SOL : USDC);
+
+    const trackedSell =
+      params.direction === 'sell'
+        ? (this.positionManager
+            .getOpenPositions()
+            .find((p) => p.mint === inputMint) ?? null)
+        : null;
+    const now = Date.now();
+    if (now < this.cooldownUntil) {
+      if (params.direction === 'buy' || !trackedSell) {
+        const sec = Math.ceil((this.cooldownUntil - now) / 1000);
+        return {
+          timestamp: new Date().toISOString(),
+          inputMint,
+          outputMint,
+          inputAmount: '0',
+          outputAmount: '0',
+          txSignature: 'n/a',
+          status: 'failed',
+          mode: this.mode,
+          strategy,
+          errorMessage: `Cooldown active (${sec}s remaining)`,
+          priceAtTrade: priceSolUsdc,
+        };
+      }
+    }
 
     if (!Number.isFinite(params.amount) || params.amount <= 0) {
       const rec: TradeRecord = {
@@ -288,7 +398,39 @@ export class TradingAgent {
       return rec;
     }
 
+    if (params.direction === 'buy') {
+      const openCount = this.positionManager.getOpenPositions().length;
+      const gate = this.riskManager.canOpenPosition(
+        openCount,
+        this.dailyRealizedPnL,
+        this.dailyStartingValueQuote,
+      );
+      if (!gate.allowed) {
+        const msg =
+          gate.reason?.includes('max_open')
+            ? `Cannot open position: max open positions (${this.riskManager.maxOpenPositions}) reached. Close existing position first.`
+            : (gate.reason ?? 'Entry blocked by risk rules');
+        return {
+          timestamp: new Date().toISOString(),
+          inputMint,
+          outputMint,
+          inputAmount: '0',
+          outputAmount: '0',
+          txSignature: 'n/a',
+          status: 'failed',
+          mode: this.mode,
+          strategy,
+          errorMessage: msg,
+          priceAtTrade: priceSolUsdc,
+        };
+      }
+    }
+
     let inputRaw = humanToRawAmount(inputMint, params.amount);
+    if (params.direction === 'sell' && trackedSell) {
+      inputRaw =
+        trackedSell.amount < inputRaw ? trackedSell.amount : inputRaw;
+    }
     inputRaw = this.capInputRaw(inputMint, inputRaw);
     if (inputRaw <= 0n) {
       const rec: TradeRecord = {
@@ -308,6 +450,84 @@ export class TradingAgent {
       return rec;
     }
 
+    if (params.direction === 'sell' && trackedSell) {
+      const rec = await this.executeSwapLeg(
+        inputMint,
+        outputMint,
+        inputRaw,
+        priceSolUsdc,
+        strategy,
+        { skipLog: true },
+      );
+      if (rec.status !== 'paper_filled' && rec.status !== 'success') {
+        logTrade(rec);
+        return rec;
+      }
+      const closed = this.positionManager.closePosition(
+        trackedSell.id,
+        priceSolUsdc,
+        'manual',
+      );
+      this.dailyRealizedPnL += closed.realizedPnlQuote;
+      this.lastTradeResult =
+        closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+      const merged: TradeRecord = {
+        timestamp: rec.timestamp,
+        inputMint: rec.inputMint,
+        outputMint: rec.outputMint,
+        inputAmount: rec.inputAmount,
+        outputAmount: rec.outputAmount,
+        expectedOutput: rec.expectedOutput,
+        txSignature: rec.txSignature,
+        status: rec.status,
+        priceImpact: rec.priceImpact,
+        mode: rec.mode,
+        strategy,
+        slippageBps: rec.slippageBps,
+        priceAtTrade: priceSolUsdc,
+        entryPrice: trackedSell.entryPrice,
+        exitPrice: priceSolUsdc,
+        exitReason: 'manual',
+        realizedPnl: closed.realizedPnlQuote,
+      };
+      logTrade(merged);
+      this.armCooldown(this.lastTradeResult);
+      return merged;
+    }
+
+    if (params.direction === 'buy') {
+      const rec = await this.executeSwapLeg(
+        inputMint,
+        outputMint,
+        inputRaw,
+        priceSolUsdc,
+        strategy,
+        { skipLog: true },
+      );
+      if (rec.status !== 'paper_filled' && rec.status !== 'success') {
+        logTrade(rec);
+        return rec;
+      }
+      const outAmt = BigInt(rec.outputAmount);
+      this.positionManager.openPosition(
+        outputMint,
+        outAmt,
+        priceSolUsdc,
+        this.mode,
+        strategy,
+        this.riskManager.stopLossPercent,
+        this.riskManager.takeProfitPercent,
+        this.riskManager.trailingStopPercent,
+      );
+      const logged: TradeRecord = {
+        ...rec,
+        entryPrice: priceSolUsdc,
+      };
+      logTrade(logged);
+      this.armCooldown(null);
+      return logged;
+    }
+
     const rec = await this.executeSwapLeg(
       inputMint,
       outputMint,
@@ -315,18 +535,81 @@ export class TradingAgent {
       priceSolUsdc,
       strategy,
     );
-    this.applyCooldownIfFilled(rec);
+    if (params.direction === 'sell' && !trackedSell) {
+      console.warn('[AGENT] Manual sell with no tracked position');
+    }
+    if (rec.status === 'paper_filled' || rec.status === 'success') {
+      this.armCooldown(null);
+    }
     return rec;
+  }
+
+  /**
+   * Close a tracked position by id (full SOL→USDC exit for v1).
+   */
+  async closePositionById(
+    positionId: string,
+    reason = 'manual_api',
+  ): Promise<TradeRecord> {
+    await this.ensureDailyNav();
+    const pos = this.positionManager
+      .getOpenPositions()
+      .find((p) => p.id === positionId);
+    if (!pos) {
+      throw new Error(`Position not found: ${positionId}`);
+    }
+    if (pos.mint !== SOL) {
+      throw new Error(
+        `closePositionById only supports SOL positions in v1 (got ${pos.mint})`,
+      );
+    }
+    const priceSolUsdc = await this.resolvePriceSolUsdc();
+    const rec = await this.executeSwapLeg(
+      SOL,
+      USDC,
+      pos.amount,
+      priceSolUsdc,
+      `close_${reason}`,
+      { skipLog: true },
+    );
+    if (rec.status !== 'paper_filled' && rec.status !== 'success') {
+      logTrade(rec);
+      return rec;
+    }
+    const closed = this.positionManager.closePosition(
+      positionId,
+      priceSolUsdc,
+      reason,
+    );
+    this.dailyRealizedPnL += closed.realizedPnlQuote;
+    this.lastTradeResult =
+      closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+    const merged: TradeRecord = {
+      timestamp: rec.timestamp,
+      inputMint: rec.inputMint,
+      outputMint: rec.outputMint,
+      inputAmount: rec.inputAmount,
+      outputAmount: rec.outputAmount,
+      expectedOutput: rec.expectedOutput,
+      txSignature: rec.txSignature,
+      status: rec.status,
+      priceImpact: rec.priceImpact,
+      mode: rec.mode,
+      strategy: `close_${reason}`,
+      slippageBps: rec.slippageBps,
+      priceAtTrade: priceSolUsdc,
+      entryPrice: pos.entryPrice,
+      exitPrice: priceSolUsdc,
+      exitReason: reason,
+      realizedPnl: closed.realizedPnlQuote,
+    };
+    logTrade(merged);
+    this.armCooldown(this.lastTradeResult);
+    return merged;
   }
 
   private async evaluate(): Promise<void> {
     if (!this.running) return;
-    const now = Date.now();
-    if (now < this.cooldownUntil) {
-      const sec = Math.ceil((this.cooldownUntil - now) / 1000);
-      console.log(`[AGENT] Cooling down, ${sec}s remaining`);
-      return;
-    }
     const n = this.priceMonitor.getSampleCount();
     if (n < 10) {
       console.log(`[AGENT] Warming up, ${n}/10 prices collected`);
@@ -336,6 +619,17 @@ export class TradingAgent {
     const sma = this.priceMonitor.getMovingAverage(20);
     const vol = this.priceMonitor.getVolatility(20);
     if (price === null || sma === null) return;
+
+    await this.ensureDailyNav();
+    await this.processRiskExits(price);
+
+    const now = Date.now();
+    if (now < this.cooldownUntil) {
+      const sec = Math.ceil((this.cooldownUntil - now) / 1000);
+      console.log(`[AGENT] Cooling down (entries), ${sec}s remaining`);
+      return;
+    }
+
     const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
     const volPct = vol * 100;
     const t = this.thresholdPct;
@@ -357,14 +651,38 @@ export class TradingAgent {
     const strategy = 'mean_reversion_v1';
     try {
       if (direction === 'buy') {
+        const openCount = this.positionManager.getOpenPositions().length;
+        const gate = this.riskManager.canOpenPosition(
+          openCount,
+          this.dailyRealizedPnL,
+          this.dailyStartingValueQuote,
+        );
+        if (!gate.allowed) {
+          console.log(`[AGENT] Entry blocked: ${gate.reason ?? 'risk'}`);
+          return;
+        }
+        const entryPrice = priceSolUsdc;
+        const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
+        const nav = await this.portfolioValueQuote();
+        const { usdcMicroSpend } = this.riskManager.calculatePositionSize(
+          nav,
+          entryPrice,
+          stopLossPrice,
+        );
         const maxUsdcRaw =
           this.mode === 'paper'
             ? this.paperEngine.getBalance(USDC).raw
             : this.liveVirtualUsdc;
-        const usdcSpend = Math.min(
-          Number(maxUsdcRaw),
-          Math.floor((this.tradeAmountLamports / 1e9) * priceSolUsdc * 1e6),
+        let usdcSpend = Number(
+          usdcMicroSpend > 0n ? usdcMicroSpend : BigInt(0),
         );
+        const fallback = Math.floor(
+          (this.tradeAmountLamports / 1e9) * priceSolUsdc * 1e6,
+        );
+        if (usdcSpend < 10_000) {
+          usdcSpend = Math.min(Number(maxUsdcRaw), fallback);
+        }
+        usdcSpend = Math.min(usdcSpend, Number(maxUsdcRaw));
         if (usdcSpend < 10_000) {
           console.log('[AGENT] Buy skipped: USDC spend too small');
           return;
@@ -377,15 +695,33 @@ export class TradingAgent {
           priceSolUsdc,
           strategy,
         );
-        this.applyCooldownIfFilled(rec);
+        if (rec.status === 'paper_filled' || rec.status === 'success') {
+          const solOut = BigInt(rec.outputAmount);
+          this.positionManager.openPosition(
+            SOL,
+            solOut,
+            entryPrice,
+            this.mode,
+            strategy,
+            this.riskManager.stopLossPercent,
+            this.riskManager.takeProfitPercent,
+            this.riskManager.trailingStopPercent,
+          );
+          this.armCooldown(null);
+        }
       } else {
+        const solPos = this.positionManager
+          .getOpenPositions()
+          .find((p) => p.mint === SOL);
         const solBal =
           this.mode === 'paper'
             ? this.paperEngine.getBalance(SOL).raw
             : this.liveVirtualSol;
-        const amountSol = BigInt(
-          Math.min(Number(this.tradeAmountLamports), Number(solBal)),
-        );
+        const amountSol = solPos
+          ? solPos.amount
+          : BigInt(
+              Math.min(Number(this.tradeAmountLamports), Number(solBal)),
+            );
         if (amountSol <= 0n) {
           console.log('[AGENT] Sell skipped: no SOL');
           return;
@@ -396,8 +732,42 @@ export class TradingAgent {
           amountSol,
           priceSolUsdc,
           strategy,
+          solPos ? { skipLog: true } : undefined,
         );
-        this.applyCooldownIfFilled(rec);
+        if (rec.status === 'paper_filled' || rec.status === 'success') {
+          if (solPos) {
+            const closed = this.positionManager.closePosition(
+              solPos.id,
+              priceSolUsdc,
+              'mean_reversion_sell',
+            );
+            this.dailyRealizedPnL += closed.realizedPnlQuote;
+            this.lastTradeResult =
+              closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+            logTrade({
+              timestamp: rec.timestamp,
+              inputMint: rec.inputMint,
+              outputMint: rec.outputMint,
+              inputAmount: rec.inputAmount,
+              outputAmount: rec.outputAmount,
+              expectedOutput: rec.expectedOutput,
+              txSignature: rec.txSignature,
+              status: rec.status,
+              priceImpact: rec.priceImpact,
+              mode: rec.mode,
+              strategy: rec.strategy,
+              slippageBps: rec.slippageBps,
+              priceAtTrade: priceSolUsdc,
+              entryPrice: solPos.entryPrice,
+              exitPrice: priceSolUsdc,
+              exitReason: 'mean_reversion_sell',
+              realizedPnl: closed.realizedPnlQuote,
+            });
+            this.armCooldown(this.lastTradeResult);
+          } else {
+            this.armCooldown(null);
+          }
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -439,6 +809,10 @@ export class TradingAgent {
     recentTrades: ReturnType<typeof getRecentTrades>;
     tradeSummary: ReturnType<typeof getTradeSummary>;
     uptimeMs: number;
+    risk: ReturnType<RiskManager['snapshot']>;
+    dailyRealizedPnL: number;
+    dailyStartingValueQuote: number;
+    openPositionsCount: number;
   }> {
     const pnl = await this.paperEngine.getPnL(this.cfg.quoteMint);
     const all = this.paperEngine.getAllBalances();
@@ -461,6 +835,68 @@ export class TradingAgent {
       recentTrades: getRecentTrades(5, this.mode),
       tradeSummary: getTradeSummary(this.mode),
       uptimeMs: this.startedAt ? Date.now() - this.startedAt.getTime() : 0,
+      risk: this.riskManager.snapshot(),
+      dailyRealizedPnL: this.dailyRealizedPnL,
+      dailyStartingValueQuote: this.dailyStartingValueQuote,
+      openPositionsCount: this.positionManager.getOpenPositions().length,
+    };
+  }
+
+  getPositionsApi(currentPrice: number | null): {
+    positions: Array<
+      Record<string, unknown> & { unrealizedPnlQuote: number }
+    >;
+    unrealizedPnLTotal: number;
+  } {
+    const px = currentPrice ?? this.priceMonitor.getLatestPrice() ?? 0;
+    const positions = this.positionManager.getOpenPositions().map((p) => {
+      const solHuman = Number(p.amount) / 1e9;
+      const unrealized =
+        p.mint === SOL ? (px - p.entryPrice) * solHuman : 0;
+      return {
+        id: p.id,
+        mint: p.mint,
+        entryTime: p.entryTime,
+        entryPrice: p.entryPrice,
+        amount: p.amount.toString(),
+        stopLossPrice: p.stopLossPrice,
+        takeProfitPrice: p.takeProfitPrice,
+        trailingStopPercent: p.trailingStopPercent,
+        highWaterMark: p.highWaterMark,
+        strategy: p.strategy,
+        mode: p.mode,
+        unrealizedPnlQuote: unrealized,
+      };
+    });
+    const unrealizedPnLTotal =
+      px > 0 ? this.positionManager.getUnrealizedPnL(px) : 0;
+    return { positions, unrealizedPnLTotal };
+  }
+
+  getClosedPositionsApi(limit: number): unknown[] {
+    return this.positionManager.getClosedPositions(limit).map((c) => ({
+      id: c.id,
+      mint: c.mint,
+      entryPrice: c.entryPrice,
+      exitPrice: c.exitPrice,
+      entryTime: c.entryTime,
+      exitTime: c.exitTime,
+      amount: c.amount.toString(),
+      realizedPnlQuote: c.realizedPnlQuote,
+      exitReason: c.exitReason,
+      strategy: c.strategy,
+      mode: c.mode,
+    }));
+  }
+
+  getRiskApiStatus(): Record<string, unknown> {
+    return {
+      ...this.riskManager.snapshot(),
+      dailyRealizedPnL: this.dailyRealizedPnL,
+      dailyStartingValueQuote: this.dailyStartingValueQuote,
+      lastTradeResult: this.lastTradeResult,
+      openPositions: this.positionManager.getOpenPositions().length,
+      utcDay: this.dailyDateKeyUtc,
     };
   }
 
@@ -474,7 +910,10 @@ export class TradingAgent {
   }
 
   setRuntimeConfig(key: string, value: string): void {
-    const k = key.toLowerCase();
+    const k = key.toLowerCase().replace(/-/g, '_');
+    if (this.riskManager.setFromKey(key, value)) {
+      return;
+    }
     if (k === 'trade_amount' || k === 'trade_amount_lamports') {
       this.tradeAmountLamports = Number(value);
       return;
@@ -483,20 +922,19 @@ export class TradingAgent {
       this.thresholdPct = Number(value);
       return;
     }
-    if (k === 'cooldown') {
-      this.cooldownMs = Number(value) * 60 * 1000;
-    }
   }
 
-  getRuntimeConfigView(): Record<string, string | number> {
+  getRuntimeConfigView(): Record<string, string | number | null> {
     return {
       mode: this.mode,
       tradeAmountLamports: this.tradeAmountLamports,
       thresholdPct: this.thresholdPct,
-      cooldownMinutes: this.cooldownMs / 60_000,
       pollIntervalMs: this.cfg.pollIntervalMs,
       paperInitialSol: this.cfg.paperInitialSol,
       paperInitialUsdc: this.cfg.paperInitialUsdc,
+      ...this.riskManager.snapshot(),
+      cooldownMinutes: this.riskManager.cooldownNormalMs / 60_000,
+      cooldownLossMinutes: this.riskManager.cooldownAfterLossMs / 60_000,
     };
   }
 

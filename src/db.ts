@@ -45,6 +45,22 @@ export function initDatabase(): void {
 
 initDatabase();
 
+function migrateTradesColumns(): void {
+  const cols = db.prepare('PRAGMA table_info(trades)').all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  const add = (name: string, ddl: string) => {
+    if (!names.has(name)) {
+      db.exec(ddl);
+    }
+  };
+  add('entry_price', 'ALTER TABLE trades ADD COLUMN entry_price REAL');
+  add('exit_price', 'ALTER TABLE trades ADD COLUMN exit_price REAL');
+  add('exit_reason', 'ALTER TABLE trades ADD COLUMN exit_reason TEXT');
+  add('realized_pnl', 'ALTER TABLE trades ADD COLUMN realized_pnl REAL');
+}
+
+migrateTradesColumns();
+
 function tradeUsdValue(
   mint: string,
   amountStr: string,
@@ -64,11 +80,13 @@ export function logTrade(trade: TradeRecord): void {
     INSERT INTO trades (
       timestamp, mode, input_mint, output_mint, input_amount, output_amount,
       expected_output, price_impact, slippage_bps, tx_signature, status,
-      error_message, strategy, price_at_trade
+      error_message, strategy, price_at_trade,
+      entry_price, exit_price, exit_reason, realized_pnl
     ) VALUES (
       @timestamp, @mode, @input_mint, @output_mint, @input_amount, @output_amount,
       @expected_output, @price_impact, @slippage_bps, @tx_signature, @status,
-      @error_message, @strategy, @price_at_trade
+      @error_message, @strategy, @price_at_trade,
+      @entry_price, @exit_price, @exit_reason, @realized_pnl
     )
   `);
   stmt.run({
@@ -86,6 +104,10 @@ export function logTrade(trade: TradeRecord): void {
     error_message: trade.errorMessage ?? null,
     strategy: trade.strategy ?? null,
     price_at_trade: trade.priceAtTrade ?? null,
+    entry_price: trade.entryPrice ?? null,
+    exit_price: trade.exitPrice ?? null,
+    exit_reason: trade.exitReason ?? null,
+    realized_pnl: trade.realizedPnl ?? null,
   });
 }
 
@@ -119,6 +141,10 @@ export type DbTradeRow = {
   error_message: string | null;
   strategy: string | null;
   price_at_trade: number | null;
+  entry_price: number | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+  realized_pnl: number | null;
 };
 
 export function getRecentTrades(limit: number, mode?: 'paper' | 'live'): DbTradeRow[] {

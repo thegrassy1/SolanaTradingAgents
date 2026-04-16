@@ -17,6 +17,14 @@ export interface AppConfig {
   paperInitialUsdc: number;
   apiPort: number;
   apiHost: string;
+  stopLossPercent: number;
+  takeProfitPercent: number;
+  trailingStopPercent: number | null;
+  maxDailyLossPercent: number;
+  maxOpenPositions: number;
+  riskPerTradePercent: number;
+  cooldownLossMinutes: number;
+  cooldownMinutes: number;
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -38,6 +46,15 @@ function parseFloatEnv(name: string, defaultValue: number): number {
   const n = Number.parseFloat(raw);
   if (Number.isNaN(n)) throw new Error(`Invalid number for ${name}: ${raw}`);
   return n;
+}
+
+function parseOptionalTrailingStop(): number | null {
+  const raw = process.env.TRAILING_STOP_PERCENT;
+  if (raw === undefined || raw === '' || raw.toLowerCase() === 'null') {
+    return null;
+  }
+  const n = Number.parseFloat(raw);
+  return Number.isNaN(n) ? null : n;
 }
 
 function parseMode(raw: string | undefined): Mode {
@@ -71,4 +88,12 @@ export const config: AppConfig = {
   paperInitialUsdc: parseFloatEnv('PAPER_INITIAL_USDC', 1000),
   apiPort: parseIntEnv('API_PORT', 3456),
   apiHost: optionalEnv('API_HOST', '0.0.0.0'),
+  stopLossPercent: parseFloatEnv('STOP_LOSS_PERCENT', 0.03),
+  takeProfitPercent: parseFloatEnv('TAKE_PROFIT_PERCENT', 0.06),
+  trailingStopPercent: parseOptionalTrailingStop(),
+  maxDailyLossPercent: parseFloatEnv('MAX_DAILY_LOSS_PERCENT', 0.05),
+  maxOpenPositions: parseIntEnv('MAX_OPEN_POSITIONS', 1),
+  riskPerTradePercent: parseFloatEnv('RISK_PER_TRADE_PERCENT', 0.02),
+  cooldownLossMinutes: parseIntEnv('COOLDOWN_LOSS_MINUTES', 30),
+  cooldownMinutes: parseIntEnv('COOLDOWN_MINUTES', 5),
 };

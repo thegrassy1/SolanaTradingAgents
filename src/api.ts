@@ -4,6 +4,7 @@ import type { TradingAgent } from './agent';
 import { config } from './config';
 import { getRecentTrades } from './db';
 import { getQuote } from './price';
+import type { TradeRecord } from './types';
 import { loadWallet } from './wallet';
 
 /** Serialize JSON with BigInt support (BigInt → string). */
@@ -140,6 +141,59 @@ async function handleRequest(
     if (method === 'GET' && pathname === '/pnl') {
       const pnl = await agent.getPaperEngine().getPnL(config.quoteMint);
       done(200, pnl);
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/positions') {
+      const px = agent.priceMonitor.getLatestPrice();
+      done(200, agent.getPositionsApi(px));
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/positions/closed') {
+      const limitRaw = url.searchParams.get('limit') ?? '20';
+      const limit = Math.min(500, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
+      done(200, agent.getClosedPositionsApi(limit));
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/risk') {
+      done(200, agent.getRiskApiStatus());
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/positions/close') {
+      const raw = await readBody(req);
+      const body = parseJson<{
+        positionId?: string;
+        all?: boolean;
+        reason?: string;
+      }>(raw);
+      const reason = typeof body.reason === 'string' ? body.reason : 'manual_api';
+      try {
+        if (body.all === true) {
+          const ids = [
+            ...agent.positionManager.getOpenPositions().map((p) => p.id),
+          ];
+          const trades: TradeRecord[] = [];
+          for (const id of ids) {
+            trades.push(await agent.closePositionById(id, reason));
+          }
+          done(200, { trades });
+          return;
+        }
+        if (typeof body.positionId === 'string' && body.positionId !== '') {
+          const rec = await agent.closePositionById(body.positionId, reason);
+          done(200, { trades: [rec] });
+          return;
+        }
+        done(400, {
+          error: 'Provide JSON body with positionId (string) or all: true',
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        done(400, { error: msg });
+      }
       return;
     }
 

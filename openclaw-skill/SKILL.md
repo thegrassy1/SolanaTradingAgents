@@ -24,7 +24,7 @@ curl -s http://172.20.0.1:3456/health
 
 ### GET /status
 
-Full agent status (same shape as `TradingAgent.getStatus()`): mode, running, latest price, SMA, volatility, cooldown, paper portfolio balances and P&L, recent trades, trade summary, uptime.
+Full agent status: mode, running, latest price, SMA, volatility, cooldown, paper portfolio balances and P&L, recent trades, trade summary, uptime, **risk** snapshot, **dailyRealizedPnL**, **dailyStartingValueQuote**, **openPositionsCount**.
 
 ```bash
 curl -s http://172.20.0.1:3456/status
@@ -45,6 +45,11 @@ curl -s "http://172.20.0.1:3456/quote?inputMint=So111111111111111111111111111111
 ### POST /trade
 
 Execute one swap in the agent’s **current** mode (paper or live).
+
+Manual trades use the **same risk layer as the auto strategy** (daily realized P&L vs day-start NAV / circuit breaker, `max_open_positions`, post-trade cooldown). The **only** difference from auto entries is that manual trades **ignore** the mean-reversion signal threshold—the user is explicitly requesting the trade.
+
+- **Buy:** `riskManager.canOpenPosition()` runs before the swap. On block, the API returns **400** with `errorMessage` explaining why (including *“Cannot open position: max open positions (N) reached…”* when at capacity). On success, the agent opens a **tracked position** on the token received (default SOL) with stop loss, take profit, and trailing stop from the current risk config (`strategy: "manual"`).
+- **Sell:** If an open position exists for the **input** mint, the sell is treated as **closing** that position: swap (capped to position size), `closePosition` with `exitReason: "manual"`, realized P&L and cooldown updates. If there is **no** tracked position, the swap still runs (discretionary) and the agent logs a warning.
 
 Body JSON:
 
@@ -88,10 +93,60 @@ curl -s -X POST http://172.20.0.1:3456/mode -H "Content-Type: application/json" 
 
 ### POST /config
 
-Update runtime settings (same keys as the agent’s `setRuntimeConfig`): e.g. `trade_amount` / `trade_amount_lamports`, `threshold` (mean-reversion percent), `cooldown` (minutes). Body: `{ "key": "...", "value": "..." }`. Cannot set `mode` here (use POST /mode).
+Update runtime settings. Body: `{ "key": "...", "value": "..." }`. Cannot set `mode` here (use POST /mode).
+
+**General / strategy:** `trade_amount` / `trade_amount_lamports`, `threshold` (mean-reversion percent), `cooldown` / `cooldown_minutes` (normal cooldown minutes).
+
+**Risk (percents as decimals, e.g. `0.03` = 3%):** `stop_loss`, `take_profit`, `trailing_stop` (use string `null` to disable), `max_daily_loss`, `max_open_positions` (integer), `risk_per_trade`, `cooldown_loss_minutes` (longer cooldown after a losing exit).
 
 ```bash
 curl -s -X POST http://172.20.0.1:3456/config -H "Content-Type: application/json" -d "{\"key\":\"threshold\",\"value\":\"3\"}"
+```
+
+```bash
+curl -s -X POST http://172.20.0.1:3456/config -H "Content-Type: application/json" -d "{\"key\":\"stop_loss\",\"value\":\"0.03\"}"
+```
+
+### GET /positions
+
+Open SOL positions (risk layer): list with `unrealizedPnlQuote` per row and `unrealizedPnLTotal`.
+
+```bash
+curl -s http://172.20.0.1:3456/positions
+```
+
+### POST /positions/close
+
+Close one open position by id, or **all** open positions. Each close runs a SOL→USDC exit (v1), updates realized P&L and cooldown like other exits. Body JSON:
+
+- `positionId` (string): close that position.
+- `all` (boolean `true`): close every open position (snapshot at request time).
+- Optional `reason` (string): passed through to the agent (default `manual_api`).
+
+Response: `{ "trades": [ ...TradeRecord ] }` (one entry per close). Errors (e.g. unknown `positionId`) return **400** with `{ "error": "..." }`.
+
+```bash
+curl -s -X POST http://172.20.0.1:3456/positions/close -H "Content-Type: application/json" -d "{\"all\":true}"
+```
+
+```bash
+curl -s -X POST http://172.20.0.1:3456/positions/close -H "Content-Type: application/json" -d "{\"positionId\":\"<uuid>\",\"reason\":\"manual\"}"
+```
+
+### GET /positions/closed
+
+Recently closed positions with realized P&L and `exitReason`. Query: **limit** (default 20, max 500).
+
+```bash
+curl -s "http://172.20.0.1:3456/positions/closed?limit=15"
+```
+
+### GET /risk
+
+Current risk parameters, daily realized P&L vs day-start NAV baseline, `lastTradeResult`, open position count, UTC day key.
+
+```bash
+curl -s http://172.20.0.1:3456/risk
 ```
 
 ### POST /reset
@@ -104,7 +159,13 @@ curl -s -X POST http://172.20.0.1:3456/reset
 
 ## How to respond
 
-- When the user says **/trade status** or asks how the agent is doing, call **GET /status** and summarize in plain language: mode (paper vs live), running or not, latest price and SMA if present, volatility and cooldown if useful, main portfolio token balances, and P&L.
+- When the user says **/trade status** or asks how the agent is doing, call **GET /status** and summarize: mode, running, price/SMA/volatility/cooldown, balances, P&L, open position count, daily P&L vs baseline, and key risk limits if useful.
+- **/trade positions** → **GET /positions** (open positions and unrealized P&L).
+- **/trade closed** → **GET /positions/closed** (recent exits with reasons and realized P&L).
+- **/trade close** → **POST /positions/close** with `{ "all": true }` (close every open position).
+- **/trade close** with a position id (e.g. from GET /positions) → **POST /positions/close** with `{ "positionId": "<uuid>" }` (optional `"reason"`).
+- **/trade risk** → **GET /risk** (risk config + circuit breaker state).
+- **/trade set stop_loss 0.03** (and similar) → **POST /config** with `{ "key": "stop_loss", "value": "0.03" }` (same pattern for `take_profit`, `trailing_stop`, `max_daily_loss`, `max_open_positions`, `risk_per_trade`, `cooldown_loss_minutes`, `cooldown`).
 - When they say **/trade buy** or want to buy SOL with USDC: first **GET /quote** with USDC as input, SOL as output, and an amount in **USDC smallest units** (human USDC × 10^6) so they see the quote; confirm they understand the amounts, then after they confirm, **POST /trade** with `{ "direction": "buy", "amount": <USDC human> }`. Warn that **live** mode spends real funds.
 - When they say **/trade sell** or want to sell SOL: quote with SOL as input, USDC as output, amount in **lamports** (human SOL × 10^9) for GET /quote; then **POST /trade** with `{ "direction": "sell", "amount": <SOL human> }` after confirmation.
 - **/trade pnl** → **GET /pnl**; summarize dollar P&L and percent.

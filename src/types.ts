@@ -38,6 +38,10 @@ export interface TradeRecord {
   slippageBps?: number;
   errorMessage?: string;
   priceAtTrade?: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  exitReason?: string;
+  realizedPnl?: number;
 }
 
 export interface PaperPortfolio {
