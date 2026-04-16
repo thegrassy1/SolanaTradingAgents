@@ -1,19 +1,23 @@
 import { config, type AppConfig } from './config';
 import {
-  db,
   getRecentTrades,
   getTradeSummary,
   logPrice,
   logTrade,
 } from './db';
 import { PaperTradingEngine } from './paper';
-import { PriceMonitor } from './price';
+import { calculatePrice, getQuote, PriceMonitor } from './price';
 import { swap } from './swap';
 import type { TradeRecord } from './types';
+import { getTokenDecimals } from './tokenInfo';
 import { loadWallet } from './wallet';
 
 const SOL = config.baseMint;
 const USDC = config.quoteMint;
+
+function humanToRawAmount(mint: string, human: number): bigint {
+  return BigInt(Math.round(human * 10 ** getTokenDecimals(mint)));
+}
 
 export class TradingAgent {
   private readonly cfg: AppConfig;
@@ -100,6 +104,221 @@ export class TradingAgent {
     console.log('[AGENT] Stopped');
   }
 
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  getStartedAt(): Date | null {
+    return this.startedAt;
+  }
+
+  private async resolvePriceSolUsdc(): Promise<number> {
+    const p = this.priceMonitor.getLatestPrice();
+    if (p !== null && p > 0) return p;
+    const q = await getQuote(
+      this.cfg.baseMint,
+      this.cfg.quoteMint,
+      this.tradeAmountLamports,
+    );
+    const din = getTokenDecimals(this.cfg.baseMint);
+    const dout = getTokenDecimals(this.cfg.quoteMint);
+    return calculatePrice(q, din, dout);
+  }
+
+  private capInputRaw(inputMint: string, raw: bigint): bigint {
+    const paperBal = this.paperEngine.getBalance(inputMint).raw;
+    if (this.mode === 'paper') {
+      return raw > paperBal ? paperBal : raw;
+    }
+    if (inputMint === SOL) {
+      return raw > this.liveVirtualSol ? this.liveVirtualSol : raw;
+    }
+    if (inputMint === USDC) {
+      return raw > this.liveVirtualUsdc ? this.liveVirtualUsdc : raw;
+    }
+    return raw;
+  }
+
+  private isSolUsdcPair(a: string, b: string): boolean {
+    const s = new Set([a, b]);
+    return s.has(SOL) && s.has(USDC);
+  }
+
+  private async executeSwapLeg(
+    inputMint: string,
+    outputMint: string,
+    inputRaw: bigint,
+    priceSolUsdc: number,
+    strategy: string,
+  ): Promise<TradeRecord> {
+    if (inputRaw <= 0n) {
+      const rec: TradeRecord = {
+        timestamp: new Date().toISOString(),
+        inputMint,
+        outputMint,
+        inputAmount: '0',
+        outputAmount: '0',
+        txSignature: 'n/a',
+        status: 'failed',
+        mode: this.mode,
+        strategy,
+        errorMessage: 'Amount must be positive',
+        priceAtTrade: priceSolUsdc,
+      };
+      logTrade(rec);
+      return rec;
+    }
+
+    try {
+      if (this.mode === 'paper') {
+        const rec = await this.paperEngine.executePaperTrade(
+          inputMint,
+          outputMint,
+          inputRaw,
+          strategy,
+        );
+        rec.priceAtTrade = priceSolUsdc;
+        logTrade(rec);
+        return rec;
+      }
+
+      const { order, result } = await swap(inputMint, outputMint, inputRaw, 'live');
+      if (!result) throw new Error('Live swap missing result');
+      const ok = String(result.status).toLowerCase().includes('success');
+      const rec: TradeRecord = {
+        timestamp: new Date().toISOString(),
+        inputMint,
+        outputMint,
+        inputAmount: result.inputAmountResult ?? order.inAmount,
+        outputAmount: result.outputAmountResult ?? order.outAmount,
+        expectedOutput: order.outAmount,
+        txSignature: result.signature,
+        status: ok ? 'success' : 'failed',
+        priceImpact: order.priceImpactPct,
+        mode: 'live',
+        strategy,
+        slippageBps: order.slippageBps,
+        priceAtTrade: priceSolUsdc,
+      };
+      logTrade(rec);
+      if (ok && this.isSolUsdcPair(inputMint, outputMint)) {
+        await this.paperEngine.executePaperTrade(
+          inputMint,
+          outputMint,
+          inputRaw,
+          'shadow_live',
+        );
+        if (inputMint === SOL) {
+          this.liveVirtualSol -= BigInt(rec.inputAmount);
+        }
+        if (inputMint === USDC) {
+          this.liveVirtualUsdc -= BigInt(rec.inputAmount);
+        }
+        if (outputMint === SOL) {
+          this.liveVirtualSol += BigInt(rec.outputAmount);
+        }
+        if (outputMint === USDC) {
+          this.liveVirtualUsdc += BigInt(rec.outputAmount);
+        }
+      }
+      return rec;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[AGENT] executeSwapLeg failed:', msg);
+      const failed: TradeRecord = {
+        timestamp: new Date().toISOString(),
+        inputMint,
+        outputMint,
+        inputAmount: inputRaw.toString(),
+        outputAmount: '0',
+        txSignature: 'n/a',
+        status: 'failed',
+        mode: this.mode,
+        strategy,
+        errorMessage: msg,
+        priceAtTrade: priceSolUsdc,
+      };
+      logTrade(failed);
+      return failed;
+    }
+  }
+
+  private applyCooldownIfFilled(rec: TradeRecord): void {
+    if (rec.status === 'paper_filled' || rec.status === 'success') {
+      this.cooldownUntil = Date.now() + this.cooldownMs;
+      console.log(
+        `[AGENT] Trade executed. Cooldown until ${new Date(this.cooldownUntil).toISOString()}`,
+      );
+    }
+  }
+
+  /**
+   * Public API: execute a single swap (amount is human units of the input token).
+   */
+  async executeTrade(params: {
+    direction: 'buy' | 'sell';
+    amount: number;
+    inputMint?: string;
+    outputMint?: string;
+  }): Promise<TradeRecord> {
+    const strategy = 'api';
+    const priceSolUsdc = await this.resolvePriceSolUsdc();
+    const inputMint =
+      params.inputMint ??
+      (params.direction === 'buy' ? USDC : SOL);
+    const outputMint =
+      params.outputMint ??
+      (params.direction === 'buy' ? SOL : USDC);
+
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
+      const rec: TradeRecord = {
+        timestamp: new Date().toISOString(),
+        inputMint,
+        outputMint,
+        inputAmount: '0',
+        outputAmount: '0',
+        txSignature: 'n/a',
+        status: 'failed',
+        mode: this.mode,
+        strategy,
+        errorMessage: 'Invalid amount',
+        priceAtTrade: priceSolUsdc,
+      };
+      logTrade(rec);
+      return rec;
+    }
+
+    let inputRaw = humanToRawAmount(inputMint, params.amount);
+    inputRaw = this.capInputRaw(inputMint, inputRaw);
+    if (inputRaw <= 0n) {
+      const rec: TradeRecord = {
+        timestamp: new Date().toISOString(),
+        inputMint,
+        outputMint,
+        inputAmount: '0',
+        outputAmount: '0',
+        txSignature: 'n/a',
+        status: 'failed',
+        mode: this.mode,
+        strategy,
+        errorMessage: 'Insufficient balance for input token',
+        priceAtTrade: priceSolUsdc,
+      };
+      logTrade(rec);
+      return rec;
+    }
+
+    const rec = await this.executeSwapLeg(
+      inputMint,
+      outputMint,
+      inputRaw,
+      priceSolUsdc,
+      strategy,
+    );
+    this.applyCooldownIfFilled(rec);
+    return rec;
+  }
+
   private async evaluate(): Promise<void> {
     if (!this.running) return;
     const now = Date.now();
@@ -127,11 +346,11 @@ export class TradingAgent {
       `[AGENT] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% signal=${signal}`,
     );
     if (signal !== 'none') {
-      await this.executeTrade(signal, price);
+      await this.executeSignalTrade(signal, price);
     }
   }
 
-  private async executeTrade(
+  private async executeSignalTrade(
     direction: 'buy' | 'sell',
     priceSolUsdc: number,
   ): Promise<void> {
@@ -151,41 +370,14 @@ export class TradingAgent {
           return;
         }
         const amountUsdc = BigInt(usdcSpend);
-        if (this.mode === 'paper') {
-          const rec = await this.paperEngine.executePaperTrade(
-            USDC,
-            SOL,
-            amountUsdc,
-            strategy,
-          );
-          rec.priceAtTrade = priceSolUsdc;
-          logTrade(rec);
-        } else {
-          const { order, result } = await swap(USDC, SOL, amountUsdc, 'live');
-          if (!result) throw new Error('Live swap missing result');
-          const ok = String(result.status).toLowerCase().includes('success');
-          const rec: TradeRecord = {
-            timestamp: new Date().toISOString(),
-            inputMint: USDC,
-            outputMint: SOL,
-            inputAmount: result.inputAmountResult ?? order.inAmount,
-            outputAmount: result.outputAmountResult ?? order.outAmount,
-            expectedOutput: order.outAmount,
-            txSignature: result.signature,
-            status: ok ? 'success' : 'failed',
-            priceImpact: order.priceImpactPct,
-            mode: 'live',
-            strategy,
-            slippageBps: order.slippageBps,
-            priceAtTrade: priceSolUsdc,
-          };
-          logTrade(rec);
-          if (ok) {
-            await this.paperEngine.executePaperTrade(USDC, SOL, amountUsdc, 'shadow_live');
-            this.liveVirtualUsdc -= BigInt(rec.inputAmount);
-            this.liveVirtualSol += BigInt(rec.outputAmount);
-          }
-        }
+        const rec = await this.executeSwapLeg(
+          USDC,
+          SOL,
+          amountUsdc,
+          priceSolUsdc,
+          strategy,
+        );
+        this.applyCooldownIfFilled(rec);
       } else {
         const solBal =
           this.mode === 'paper'
@@ -198,49 +390,18 @@ export class TradingAgent {
           console.log('[AGENT] Sell skipped: no SOL');
           return;
         }
-        if (this.mode === 'paper') {
-          const rec = await this.paperEngine.executePaperTrade(
-            SOL,
-            USDC,
-            amountSol,
-            strategy,
-          );
-          rec.priceAtTrade = priceSolUsdc;
-          logTrade(rec);
-        } else {
-          const { order, result } = await swap(SOL, USDC, amountSol, 'live');
-          if (!result) throw new Error('Live swap missing result');
-          const ok = String(result.status).toLowerCase().includes('success');
-          const rec: TradeRecord = {
-            timestamp: new Date().toISOString(),
-            inputMint: SOL,
-            outputMint: USDC,
-            inputAmount: result.inputAmountResult ?? order.inAmount,
-            outputAmount: result.outputAmountResult ?? order.outAmount,
-            expectedOutput: order.outAmount,
-            txSignature: result.signature,
-            status: ok ? 'success' : 'failed',
-            priceImpact: order.priceImpactPct,
-            mode: 'live',
-            strategy,
-            slippageBps: order.slippageBps,
-            priceAtTrade: priceSolUsdc,
-          };
-          logTrade(rec);
-          if (ok) {
-            await this.paperEngine.executePaperTrade(SOL, USDC, amountSol, 'shadow_live');
-            this.liveVirtualSol -= BigInt(rec.inputAmount);
-            this.liveVirtualUsdc += BigInt(rec.outputAmount);
-          }
-        }
+        const rec = await this.executeSwapLeg(
+          SOL,
+          USDC,
+          amountSol,
+          priceSolUsdc,
+          strategy,
+        );
+        this.applyCooldownIfFilled(rec);
       }
-      this.cooldownUntil = Date.now() + this.cooldownMs;
-      console.log(
-        `[AGENT] Trade executed. Cooldown until ${new Date(this.cooldownUntil).toISOString()}`,
-      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error('[AGENT] executeTrade failed:', msg);
+      console.error('[AGENT] executeSignalTrade failed:', msg);
       const failed: TradeRecord = {
         timestamp: new Date().toISOString(),
         inputMint: direction === 'buy' ? USDC : SOL,

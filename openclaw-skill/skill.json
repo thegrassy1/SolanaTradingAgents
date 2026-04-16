@@ -1,9 +1,0 @@
-{
-  "name": "solana-trader",
-  "displayName": "Solana Trading Agent",
-  "description": "Trade Solana tokens via Jupiter. Supports paper and live trading. Commands: status, buy, sell, history, pnl, start, stop, mode",
-  "version": "1.0.0",
-  "triggers": {
-    "commands": ["/trade", "/trader"]
-  }
-}
