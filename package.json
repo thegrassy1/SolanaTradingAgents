@@ -9,6 +9,7 @@
     "start:live": "cross-env MODE=live ts-node src/index.ts",
     "build": "tsc",
     "start:prod": "node dist/src/index.js",
+    "preview:dashboard": "ts-node -e \"const fs=require('fs');const p=require('path');const o=require('os');import('./src/dashboard').then(m=>{const f=p.join(o.tmpdir(),'dashboard-preview.html');fs.writeFileSync(f,m.getDashboardHtml());console.log('Wrote',f);})\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

@@ -2,6 +2,7 @@ import http from 'http';
 import { URL } from 'url';
 import type { TradingAgent } from './agent';
 import { config } from './config';
+import { getDashboardHtml } from './dashboard';
 import { getRecentTrades } from './db';
 import { getQuote } from './price';
 import type { TradeRecord } from './types';
@@ -86,6 +87,38 @@ async function handleRequest(
   };
 
   try {
+    if (method === 'GET' && (pathname === '/' || pathname === '/dashboard')) {
+      const html = getDashboardHtml();
+      logCode = 200;
+      const body = Buffer.from(html, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': body.length,
+        'Content-Security-Policy': [
+          "default-src 'none'",
+          "base-uri 'none'",
+          "script-src 'unsafe-inline' https://cdn.jsdelivr.net",
+          "style-src 'unsafe-inline'",
+          "connect-src 'self'",
+          'img-src data: blob:',
+          "font-src 'self' https://cdn.jsdelivr.net",
+        ].join('; '),
+      });
+      res.end(body);
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/prices/recent') {
+      const limitRaw = url.searchParams.get('limit') ?? '50';
+      const limit = Math.min(
+        100,
+        Math.max(1, Number.parseInt(limitRaw, 10) || 50),
+      );
+      const points = agent.priceMonitor.getPriceHistory(limit);
+      done(200, { points });
+      return;
+    }
+
     if (method === 'GET' && pathname === '/health') {
       const uptimeSec = agent.getStartedAt()
         ? Math.floor((Date.now() - agent.getStartedAt()!.getTime()) / 1000)

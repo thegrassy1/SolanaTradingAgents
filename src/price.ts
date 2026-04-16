@@ -119,4 +119,10 @@ export class PriceMonitor {
   getSampleCount(): number {
     return this.history.length;
   }
+
+  /** Last up to `maxPoints` price samples (oldest first within slice). */
+  getPriceHistory(maxPoints = 50): PricePoint[] {
+    const n = Math.min(Math.max(1, maxPoints), this.history.length);
+    return this.history.slice(-n);
+  }
 }

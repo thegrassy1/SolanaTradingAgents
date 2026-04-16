@@ -27,3 +27,5 @@ Use the HTTP API (default `http://172.20.0.1:3456` in this repo’s SKILL; adjus
 | `/trade set trade_amount 10000000` | `POST /config` body `{"key":"trade_amount","value":"10000000"}` |
 
 Other endpoints: `GET /health`, `GET /quote`, `POST /trade`, `POST /positions/close`, `POST /mode`, `POST /reset` — see `openclaw-skill/SKILL.md`.
+
+**Dashboard:** visit `http://172.20.0.1:3456/` in a browser on the same network (or via Tailscale/SSH tunnel).

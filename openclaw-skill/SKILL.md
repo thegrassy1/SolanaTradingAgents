@@ -4,6 +4,8 @@ You have access to a Solana trading agent running on the user’s machine (or VP
 
 Assume the agent process is already running (`npm start` or equivalent). If a request fails with connection refused, tell the user to start the agent first and verify `API_HOST` / `API_PORT` and Docker networking.
 
+The agent also serves a **web dashboard** at **GET /** — point the user to `http://<host>:3456/` on the same network (same host/port as the API) to open it in a browser.
+
 ## When to use this skill
 
 Use this skill when the user mentions trading, crypto, Solana, Jupiter, their portfolio, paper trading, live trading, or uses commands like `/trade`, `/trader`, or asks for status, quotes, P&L, or trade history for this agent.
