@@ -5,6 +5,8 @@ import type { TradeRecord } from './types';
 import { config } from './config';
 import { getTokenDecimals } from './tokenInfo';
 
+export type SqliteDatabase = InstanceType<typeof Database>;
+
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_PATH = path.join(DATA_DIR, 'trades.db');
 
@@ -215,6 +217,103 @@ export function getPaperVsLiveComparison(): {
   const live = getTradeSummary('live');
   const hasBoth = paper.totalTrades > 0 && live.totalTrades > 0;
   return { paper, live, hasBoth };
+}
+
+/** Count trade rows since UTC midnight of the current UTC day (timestamp column is ISO string). */
+export function countTradesTodayUtc(
+  database: SqliteDatabase,
+  mode?: 'paper' | 'live',
+): number {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  const startIso = d.toISOString();
+  if (mode) {
+    const row = database
+      .prepare(
+        `SELECT COUNT(*) AS c FROM trades WHERE timestamp >= ? AND mode = ?`,
+      )
+      .get(startIso, mode) as { c: number };
+    return row.c;
+  }
+  const row = database
+    .prepare(`SELECT COUNT(*) AS c FROM trades WHERE timestamp >= ?`)
+    .get(startIso) as { c: number };
+  return row.c;
+}
+
+export type ClosedExitStats = {
+  totalClosed: number;
+  wins: number;
+  losses: number;
+  avgWin: number | null;
+  avgLoss: number | null;
+  winRatePct: number;
+  exitReasons: {
+    stop_loss: number;
+    take_profit: number;
+    trailing_stop: number;
+    manual: number;
+  };
+};
+
+/** Rows that closed a position (have exit_reason + realized_pnl). */
+export function getClosedExitStats(
+  database: SqliteDatabase,
+  mode?: 'paper' | 'live',
+): ClosedExitStats {
+  const rows = (
+    mode
+      ? database
+          .prepare(
+            `SELECT exit_reason, realized_pnl FROM trades WHERE exit_reason IS NOT NULL AND realized_pnl IS NOT NULL AND mode = ?`,
+          )
+          .all(mode)
+      : database
+          .prepare(
+            `SELECT exit_reason, realized_pnl FROM trades WHERE exit_reason IS NOT NULL AND realized_pnl IS NOT NULL`,
+          )
+          .all()
+  ) as { exit_reason: string; realized_pnl: number }[];
+
+  const exitReasons = {
+    stop_loss: 0,
+    take_profit: 0,
+    trailing_stop: 0,
+    manual: 0,
+  };
+  let wins = 0;
+  let losses = 0;
+  let sumWin = 0;
+  let sumLoss = 0;
+
+  for (const r of rows) {
+    const reason = r.exit_reason;
+    if (reason === 'stop_loss') exitReasons.stop_loss += 1;
+    else if (reason === 'take_profit') exitReasons.take_profit += 1;
+    else if (reason === 'trailing_stop') exitReasons.trailing_stop += 1;
+    else exitReasons.manual += 1;
+
+    const pnl = r.realized_pnl;
+    if (pnl > 0) {
+      wins += 1;
+      sumWin += pnl;
+    } else if (pnl < 0) {
+      losses += 1;
+      sumLoss += pnl;
+    }
+  }
+
+  const totalClosed = rows.length;
+  const decided = wins + losses;
+  return {
+    totalClosed,
+    wins,
+    losses,
+    avgWin: wins > 0 ? sumWin / wins : null,
+    avgLoss: losses > 0 ? sumLoss / losses : null,
+    winRatePct: decided === 0 ? 0 : (wins / decided) * 100,
+    exitReasons,
+  };
 }
 
 export { db };

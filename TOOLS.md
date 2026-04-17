@@ -25,7 +25,8 @@ Use the HTTP API (default `http://172.20.0.1:3456` in this repo’s SKILL; adjus
 | `/trade set cooldown 5` | `POST /config` body `{"key":"cooldown","value":"5"}` (normal cooldown, minutes) |
 | `/trade set threshold 2` | `POST /config` body `{"key":"threshold","value":"2"}` |
 | `/trade set trade_amount 10000000` | `POST /config` body `{"key":"trade_amount","value":"10000000"}` |
+| `/trade report` | `POST http://172.20.0.1:3456/report/send` (no body) — sends the daily Telegram report |
 
-Other endpoints: `GET /health`, `GET /quote`, `POST /trade`, `POST /positions/close`, `POST /mode`, `POST /reset` — see `openclaw-skill/SKILL.md`.
+Other endpoints: `GET /health`, `GET /quote`, `POST /trade`, `POST /positions/close`, `POST /mode`, `POST /reset`, `POST /report/send` — see `openclaw-skill/SKILL.md`.
 
 **Dashboard:** visit `http://172.20.0.1:3456/` in a browser on the same network (or via Tailscale/SSH tunnel).

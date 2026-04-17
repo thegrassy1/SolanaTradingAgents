@@ -159,6 +159,14 @@ Reset the **paper** portfolio to initial balances. Response: `{ message, balance
 curl -s -X POST http://172.20.0.1:3456/reset
 ```
 
+### POST /report/send
+
+Manually build the daily Telegram report (same content as the scheduled job) and send it via the bot. Requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the agent’s environment. Success: **200** `{ "ok": true, "message": "Report sent" }`. Failure (e.g. missing token, Telegram error): **500** `{ "error": "..." }`.
+
+```bash
+curl -s -X POST http://172.20.0.1:3456/report/send
+```
+
 ## How to respond
 
 - When the user says **/trade status** or asks how the agent is doing, call **GET /status** and summarize: mode, running, price/SMA/volatility/cooldown, balances, P&L, open position count, daily P&L vs baseline, and key risk limits if useful.
@@ -175,6 +183,7 @@ curl -s -X POST http://172.20.0.1:3456/reset
 - **/trade mode paper** or **live** → **POST /mode**; if they want **live**, warn clearly first; if the API returns 400 about the wallet, explain they must set `PRIVATE_KEY` and restart.
 - For **/trade config** or changing thresholds, use **GET /status** or describe current config from context if you have it, and **POST /config** for updates.
 - For **/trade reset**, call **POST /reset** only after explicit user confirmation (destructive to paper state).
+- **/trade report** → **POST /report/send** to manually trigger the Telegram daily report (for testing or on-demand summaries).
 - If the user’s command does not map to an endpoint, list the supported commands briefly.
 
 ## Response formatting

@@ -3,6 +3,10 @@ import dotenv from 'dotenv';
 import { TradingAgent } from './agent';
 import { startApiServer, stopApiServer } from './api';
 import { config } from './config';
+import { db } from './db';
+import { buildDailyReport } from './report';
+import { startScheduler, stopScheduler } from './scheduler';
+import { sendTelegramMessage } from './telegram';
 import { loadWallet } from './wallet';
 
 dotenv.config();
@@ -29,8 +33,30 @@ agent.start();
 let apiServer: Server | null = null;
 apiServer = startApiServer(agent);
 
+const sendDailyReport = async (): Promise<void> => {
+  try {
+    const report = await buildDailyReport(agent, agent.paperEngine, db);
+    await sendTelegramMessage(report);
+    console.log('[SCHEDULER] Daily report sent');
+  } catch (err) {
+    console.error('[SCHEDULER] Report failed:', err);
+  }
+};
+
+if (config.telegramBotToken && config.telegramChatId) {
+  startScheduler(sendDailyReport);
+  console.log(
+    '[SCHEDULER] Daily report enabled for',
+    config.reportCron,
+    config.reportTimezone,
+  );
+} else {
+  console.log('[SCHEDULER] Telegram not configured — daily reports disabled');
+}
+
 function shutdown(): void {
   const done = (): void => {
+    stopScheduler();
     agent.stop();
     process.exit(0);
   };

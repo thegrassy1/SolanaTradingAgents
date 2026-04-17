@@ -3,7 +3,9 @@ import { URL } from 'url';
 import type { TradingAgent } from './agent';
 import { config } from './config';
 import { getDashboardHtml } from './dashboard';
-import { getRecentTrades } from './db';
+import { db, getRecentTrades } from './db';
+import { buildDailyReport } from './report';
+import { sendTelegramMessage } from './telegram';
 import { getQuote } from './price';
 import type { TradeRecord } from './types';
 import { loadWallet } from './wallet';
@@ -317,6 +319,22 @@ async function handleRequest(
         message: 'Paper portfolio reset',
         balances: human,
       });
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/report/send') {
+      try {
+        const report = await buildDailyReport(
+          agent,
+          agent.paperEngine,
+          db,
+        );
+        await sendTelegramMessage(report);
+        done(200, { ok: true, message: 'Report sent' });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        done(500, { error: msg });
+      }
       return;
     }
 

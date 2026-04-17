@@ -25,6 +25,10 @@ export interface AppConfig {
   riskPerTradePercent: number;
   cooldownLossMinutes: number;
   cooldownMinutes: number;
+  telegramBotToken: string;
+  telegramChatId: string;
+  reportCron: string;
+  reportTimezone: string;
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -96,4 +100,8 @@ export const config: AppConfig = {
   riskPerTradePercent: parseFloatEnv('RISK_PER_TRADE_PERCENT', 0.02),
   cooldownLossMinutes: parseIntEnv('COOLDOWN_LOSS_MINUTES', 30),
   cooldownMinutes: parseIntEnv('COOLDOWN_MINUTES', 5),
+  telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN ?? '').trim(),
+  telegramChatId: (process.env.TELEGRAM_CHAT_ID ?? '').trim(),
+  reportCron: optionalEnv('REPORT_CRON', '0 17 * * *'),
+  reportTimezone: optionalEnv('REPORT_TIMEZONE', 'America/Chicago'),
 };

@@ -34,6 +34,9 @@ input[type=text]{min-height:44px;padding:0 12px;border-radius:8px;border:1px sol
 footer button{min-height:44px;padding:0 16px;border-radius:8px;border:1px solid var(--bd);background:#21262d;color:var(--txt);font-weight:600;cursor:pointer;margin:4px 4px 0 0}
 footer button.primary{border-color:var(--acc);color:var(--acc)}
 .warn{font-size:12px;color:var(--live);margin-top:6px}
+.grid-pr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px;align-items:start}
+.grid-pr .card{margin-bottom:0;min-width:0}
+.grid-pr .pos-list{max-height:min(50vh,420px);overflow-y:auto;-webkit-overflow-scrolling:touch}
 @media(min-width:900px){.grid-wide{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.grid-wide .card{margin-bottom:0}}
 `;
 
@@ -116,6 +119,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 </section>
 <section class="card"><h2>Price chart</h2><div class="chart-wrap"><canvas id="priceChart"></canvas></div></section>
 </div>
+<div class="grid-pr">
 <section class="card"><h2>Portfolio</h2>
 <div class="row"><div><span>Total value (USDC)</span><strong id="portVal">—</strong></div><div><span>P&amp;L</span><strong id="portPnl">—</strong></div><div><span>P&amp;L %</span><strong id="portPct">—</strong></div></div>
 <div id="balances"></div>
@@ -127,6 +131,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 <div class="row"><div><span>Max open positions</span><strong id="maxOpen">—</strong></div><div><span>Risk per trade</span><strong id="rptPct">—</strong></div></div>
 <p id="riskWarn" class="warn"></p>
 </section>
+</div>
 <section class="card"><h2>Recent trades</h2><div id="trades"></div></section>
 <footer class="controls">
 <h2 style="margin:0 0 8px">Controls</h2>
