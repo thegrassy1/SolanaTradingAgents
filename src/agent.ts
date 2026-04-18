@@ -792,6 +792,7 @@ export class TradingAgent {
   async getStatus(): Promise<{
     mode: 'paper' | 'live';
     running: boolean;
+    thresholdPct: number;
     latestPrice: number | null;
     priceChange: number | null;
     sma: number | null;
@@ -823,6 +824,7 @@ export class TradingAgent {
     return {
       mode: this.mode,
       running: this.running,
+      thresholdPct: this.thresholdPct,
       latestPrice: this.priceMonitor.getLatestPrice(),
       priceChange: this.priceMonitor.getPriceChange(),
       sma: this.priceMonitor.getMovingAverage(20),
