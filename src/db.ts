@@ -164,47 +164,87 @@ export function getRecentTrades(limit: number, mode?: 'paper' | 'live'): DbTrade
 
 export type TradeSummary = {
   totalTrades: number;
+  openTrades: number;
+  closedTrades: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  winRate: number;
+  avgWin: number | null;
+  avgLoss: number | null;
+  expectancy: number | null;
   successfulTrades: number;
   failedTrades: number;
   totalVolumeIn: string;
   totalVolumeOut: string;
-  winRate: number;
 };
 
 export function getTradeSummary(mode?: 'paper' | 'live'): TradeSummary {
-  const where = mode ? 'WHERE mode = ?' : '';
-  const rows = (
-    mode
-      ? db.prepare(`SELECT * FROM trades ${where}`).all(mode)
-      : db.prepare(`SELECT * FROM trades`).all()
-  ) as DbTradeRow[];
+  type AggRow = {
+    total: number;
+    opens: number;
+    closes: number;
+    wins: number;
+    losses: number;
+    breakevens: number;
+    avg_win: number | null;
+    avg_loss: number | null;
+    failed: number;
+    vol_in: number | null;
+    vol_out: number | null;
+  };
 
-  const ok = rows.filter(
-    (r) => r.status === 'success' || r.status === 'paper_filled',
-  );
-  const failed = rows.filter((r) => r.status === 'failed').length;
-  let wins = 0;
-  let compared = 0;
-  let volIn = 0n;
-  let volOut = 0n;
-  for (const r of ok) {
-    volIn += BigInt(r.input_amount);
-    volOut += BigInt(r.output_amount);
-    const p = r.price_at_trade;
-    const vin = tradeUsdValue(r.input_mint, r.input_amount, p);
-    const vout = tradeUsdValue(r.output_mint, r.output_amount, p);
-    if (vin !== null && vout !== null) {
-      compared += 1;
-      if (vout > vin) wins += 1;
-    }
-  }
+  const sql = `
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN exit_price IS NULL THEN 1 ELSE 0 END) AS opens,
+      SUM(CASE WHEN exit_price IS NOT NULL THEN 1 ELSE 0 END) AS closes,
+      SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN exit_price IS NOT NULL AND realized_pnl = 0 THEN 1 ELSE 0 END) AS breakevens,
+      AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END) AS avg_win,
+      AVG(CASE WHEN realized_pnl < 0 THEN realized_pnl END) AS avg_loss,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CAST(input_amount AS REAL)) AS vol_in,
+      SUM(CAST(output_amount AS REAL)) AS vol_out
+    FROM trades
+  `;
+
+  const row = (
+    mode
+      ? db.prepare(sql + ' WHERE mode = ?').get(mode)
+      : db.prepare(sql).get()
+  ) as AggRow;
+
+  const wins = row.wins ?? 0;
+  const losses = row.losses ?? 0;
+  const decided = wins + losses;
+  const winRate = decided === 0 ? 0 : (wins / decided) * 100;
+  const avgWin = row.avg_win ?? null;
+  const avgLoss = row.avg_loss ?? null;
+  const expectancy =
+    decided > 0
+      ? (avgWin !== null ? avgWin * (wins / decided) : 0) +
+        (avgLoss !== null ? avgLoss * (losses / decided) : 0)
+      : null;
+  const total = row.total ?? 0;
+  const failed = row.failed ?? 0;
+
   return {
-    totalTrades: rows.length,
-    successfulTrades: ok.length,
+    totalTrades: total,
+    openTrades: row.opens ?? 0,
+    closedTrades: row.closes ?? 0,
+    wins,
+    losses,
+    breakevens: row.breakevens ?? 0,
+    winRate,
+    avgWin,
+    avgLoss,
+    expectancy,
+    successfulTrades: total - failed,
     failedTrades: failed,
-    totalVolumeIn: volIn.toString(),
-    totalVolumeOut: volOut.toString(),
-    winRate: compared === 0 ? 0 : (wins / compared) * 100,
+    totalVolumeIn: String(Math.round(row.vol_in ?? 0)),
+    totalVolumeOut: String(Math.round(row.vol_out ?? 0)),
   };
 }
 
@@ -245,6 +285,7 @@ export type ClosedExitStats = {
   totalClosed: number;
   wins: number;
   losses: number;
+  breakevens: number;
   avgWin: number | null;
   avgLoss: number | null;
   winRatePct: number;
@@ -283,6 +324,7 @@ export function getClosedExitStats(
   };
   let wins = 0;
   let losses = 0;
+  let breakevens = 0;
   let sumWin = 0;
   let sumLoss = 0;
 
@@ -300,6 +342,8 @@ export function getClosedExitStats(
     } else if (pnl < 0) {
       losses += 1;
       sumLoss += pnl;
+    } else {
+      breakevens += 1;
     }
   }
 
@@ -309,6 +353,7 @@ export function getClosedExitStats(
     totalClosed,
     wins,
     losses,
+    breakevens,
     avgWin: wins > 0 ? sumWin / wins : null,
     avgLoss: losses > 0 ? sumLoss / losses : null,
     winRatePct: decided === 0 ? 0 : (wins / decided) * 100,

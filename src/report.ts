@@ -220,19 +220,27 @@ export async function buildDailyReport(
   lines.push(`Circuit Breaker: ${escapeHtml(circuitLabel)}`);
   lines.push('');
   lines.push('<b>Trade Stats (all time)</b>');
-  lines.push(`Total Trades: ${String(tradeSummary.totalTrades)}`);
-  lines.push(`Successful: ${String(tradeSummary.successfulTrades)}`);
-  lines.push(`Failed: ${String(tradeSummary.failedTrades)}`);
+  lines.push(
+    `Total Trades: ${String(tradeSummary.totalTrades)}  (Closed: ${String(tradeSummary.closedTrades)}, Opens: ${String(tradeSummary.openTrades)})`,
+  );
+  if (tradeSummary.failedTrades > 0) {
+    lines.push(`Failed: ${String(tradeSummary.failedTrades)}`);
+  }
   lines.push('');
   lines.push('<b>Closed Positions</b>');
-  lines.push(`Total Closed: ${String(closed.totalClosed)}`);
   lines.push(
-    `Wins: ${String(closed.wins)} (avg ${fmtUsdSigned(closed.avgWin)})`,
+    `Wins: ${String(tradeSummary.wins)}  |  Losses: ${String(tradeSummary.losses)}  |  Breakevens: ${String(tradeSummary.breakevens)}`,
   );
+  const decided = tradeSummary.wins + tradeSummary.losses;
+  const winRateLine =
+    decided < 5
+      ? `Win Rate: — (insufficient data, need ≥5 closes)`
+      : `Win Rate: ${fmtPctPlain(tradeSummary.winRate)}`;
+  lines.push(winRateLine);
   lines.push(
-    `Losses: ${String(closed.losses)} (avg ${fmtUsdSigned(closed.avgLoss)})`,
+    `Avg Win: ${fmtUsdSigned(tradeSummary.avgWin)}  |  Avg Loss: ${fmtUsdSigned(tradeSummary.avgLoss)}`,
   );
-  lines.push(`Win Rate: ${fmtPctPlain(closed.winRatePct)}`);
+  lines.push(`Expectancy: ${fmtUsdSigned(tradeSummary.expectancy)}/trade`);
   lines.push(
     `Exit Reasons: stop_loss=${exitReasons.stop_loss}, take_profit=${exitReasons.take_profit}, trailing_stop=${exitReasons.trailing_stop}, manual=${exitReasons.manual}`,
   );
