@@ -1,11 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { config } from './config';
 import { swapPaper } from './swap';
 import type { TradeRecord } from './types';
 import { getTokenDecimals, getTokenSymbol } from './tokenInfo';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const PORTFOLIO_FILE = path.join(DATA_DIR, 'paper-portfolio.json');
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 function ensureDataDir(): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -126,6 +128,7 @@ export class PaperTradingEngine {
     outputMint: string,
     amountSmallestUnits: bigint,
     strategy = 'manual',
+    priceSolUsdc?: number,
   ): Promise<TradeRecord> {
     const bal = this.balances[inputMint] ?? 0n;
     if (bal < amountSmallestUnits) {
@@ -135,9 +138,42 @@ export class PaperTradingEngine {
     }
     const { order } = await swapPaper(inputMint, outputMint, amountSmallestUnits);
     const quotedOut = BigInt(order.outAmount);
-    const adjustedOut = (quotedOut * 999n) / 1000n;
+
+    // Taker fee: applied as bps haircut on the quoted output amount.
+    const takerBps = BigInt(Math.max(0, config.paperTakerFeeBps | 0));
+    const takerFeeRaw = (quotedOut * takerBps) / 10_000n;
+    const adjustedOut = quotedOut - takerFeeRaw;
+
+    // Network + priority fees: paid in SOL on every swap, deducted from
+    // SOL balance (clamped at zero so paper can't overdraft).
+    const baseFeeLamports = BigInt(Math.max(0, config.paperNetworkFeeLamports | 0));
+    const prioFeeLamports = BigInt(Math.max(0, config.paperPriorityFeeLamports | 0));
+    const totalSolFeeLamports = baseFeeLamports + prioFeeLamports;
+
     this.balances[inputMint] = bal - amountSmallestUnits;
-    this.balances[outputMint] = (this.balances[outputMint] ?? 0n) + adjustedOut;
+    this.balances[outputMint] =
+      (this.balances[outputMint] ?? 0n) + adjustedOut;
+
+    const curSol = this.balances[SOL_MINT] ?? 0n;
+    const solFeePaid = curSol >= totalSolFeeLamports ? totalSolFeeLamports : curSol;
+    if (solFeePaid > 0n) {
+      this.balances[SOL_MINT] = curSol - solFeePaid;
+    }
+
+    // Convert fees to quote currency for reporting.
+    const px = typeof priceSolUsdc === 'number' && isFinite(priceSolUsdc)
+      ? priceSolUsdc
+      : 0;
+    const takerFeeHuman = smallestToHuman(outputMint, takerFeeRaw);
+    let takerFeeQuote = 0;
+    if (outputMint === this.quoteMintForPnl) {
+      takerFeeQuote = takerFeeHuman;
+    } else if (outputMint === SOL_MINT && px > 0) {
+      takerFeeQuote = takerFeeHuman * px;
+    }
+    const solFeeHuman = Number(solFeePaid) / 1e9;
+    const solFeeQuote = px > 0 ? solFeeHuman * px : 0;
+    const feesQuote = takerFeeQuote + solFeeQuote;
 
     const record: TradeRecord = {
       timestamp: new Date().toISOString(),
@@ -152,12 +188,19 @@ export class PaperTradingEngine {
       mode: 'paper',
       strategy,
       slippageBps: order.slippageBps,
+      takerFeeBps: Number(takerBps),
+      takerFeeQuote,
+      networkFeeLamports: Number(baseFeeLamports),
+      priorityFeeLamports: Number(prioFeeLamports),
+      solFeeQuote,
+      feesQuote,
     };
     this.tradeHistory.push(record);
     const hi = smallestToHuman(inputMint, amountSmallestUnits);
     const ho = smallestToHuman(outputMint, adjustedOut);
     console.log(
-      `[PAPER] Executed: ${hi.toFixed(6)} ${getTokenSymbol(inputMint)} → ${ho.toFixed(6)} ${getTokenSymbol(outputMint)}`,
+      `[PAPER] Executed: ${hi.toFixed(6)} ${getTokenSymbol(inputMint)} \u2192 ${ho.toFixed(6)} ${getTokenSymbol(outputMint)} ` +
+      `fees: taker=${takerFeeQuote.toFixed(4)} sol=${solFeeQuote.toFixed(4)} total=${feesQuote.toFixed(4)} (quote)`,
     );
     this.persist();
     return record;

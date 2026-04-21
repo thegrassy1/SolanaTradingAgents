@@ -20,6 +20,10 @@ export interface Position {
   highWaterMark: number;
   strategy: string;
   mode: 'paper' | 'live';
+  /** Quote currency actually spent to open this position (human units). */
+  entryQuoteAmount?: number | null;
+  /** Fees paid on the entry leg, in quote currency. */
+  entryFeesQuote?: number | null;
 }
 
 export interface ClosedPosition {
@@ -30,7 +34,30 @@ export interface ClosedPosition {
   entryTime: string;
   exitTime: string;
   amount: bigint;
+  /**
+   * Legacy gross realized P&L in quote currency.
+   * `(exit - entry) * size`. Kept for backward compatibility.
+   */
   realizedPnlQuote: number;
+  /** Alias of realizedPnlQuote. Always gross of fees. */
+  realizedPnlGross?: number;
+  /**
+   * True net P&L from actual balance flows:
+   * `(exitQuoteAmount - entryQuoteAmount) - entryFeesQuote - exitFeesQuote`.
+   * Null when the position was opened before the fee-aware refactor and
+   * we don't know the entry-side quote flow.
+   */
+  realizedPnlNet?: number | null;
+  /** Total round-trip fees in quote currency (entry + exit legs). */
+  feesQuote?: number | null;
+  /** USDC actually spent to open (human units). */
+  entryQuoteAmount?: number | null;
+  /** USDC actually received on close (human units). */
+  exitQuoteAmount?: number | null;
+  /** Fees paid on entry leg in quote currency. */
+  entryFeesQuote?: number | null;
+  /** Fees paid on exit leg in quote currency. */
+  exitFeesQuote?: number | null;
   exitReason: ExitReason | string;
   strategy: string;
   mode: 'paper' | 'live';
@@ -55,27 +82,22 @@ function serializePosition(p: Position): Record<string, unknown> {
 }
 
 function deserializePosition(row: Record<string, unknown>): Position {
+  const nullableNum = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
   return {
     id: String(row.id),
     mint: String(row.mint),
     entryPrice: Number(row.entryPrice),
     entryTime: String(row.entryTime),
     amount: BigInt(String(row.amount)),
-    stopLossPrice:
-      row.stopLossPrice === null || row.stopLossPrice === undefined
-        ? null
-        : Number(row.stopLossPrice),
-    takeProfitPrice:
-      row.takeProfitPrice === null || row.takeProfitPrice === undefined
-        ? null
-        : Number(row.takeProfitPrice),
-    trailingStopPercent:
-      row.trailingStopPercent === null || row.trailingStopPercent === undefined
-        ? null
-        : Number(row.trailingStopPercent),
+    stopLossPrice: nullableNum(row.stopLossPrice),
+    takeProfitPrice: nullableNum(row.takeProfitPrice),
+    trailingStopPercent: nullableNum(row.trailingStopPercent),
     highWaterMark: Number(row.highWaterMark),
     strategy: String(row.strategy),
     mode: row.mode === 'live' ? 'live' : 'paper',
+    entryQuoteAmount: nullableNum(row.entryQuoteAmount),
+    entryFeesQuote: nullableNum(row.entryFeesQuote),
   };
 }
 
@@ -87,6 +109,8 @@ function serializeClosed(c: ClosedPosition): Record<string, unknown> {
 }
 
 function deserializeClosed(row: Record<string, unknown>): ClosedPosition {
+  const nullableNum = (v: unknown): number | null =>
+    v === null || v === undefined ? null : Number(v);
   return {
     id: String(row.id),
     mint: String(row.mint),
@@ -96,6 +120,13 @@ function deserializeClosed(row: Record<string, unknown>): ClosedPosition {
     exitTime: String(row.exitTime),
     amount: BigInt(String(row.amount)),
     realizedPnlQuote: Number(row.realizedPnlQuote),
+    realizedPnlGross: nullableNum(row.realizedPnlGross) ?? Number(row.realizedPnlQuote),
+    realizedPnlNet: nullableNum(row.realizedPnlNet),
+    feesQuote: nullableNum(row.feesQuote),
+    entryQuoteAmount: nullableNum(row.entryQuoteAmount),
+    exitQuoteAmount: nullableNum(row.exitQuoteAmount),
+    entryFeesQuote: nullableNum(row.entryFeesQuote),
+    exitFeesQuote: nullableNum(row.exitFeesQuote),
     exitReason: String(row.exitReason),
     strategy: String(row.strategy),
     mode: row.mode === 'live' ? 'live' : 'paper',
@@ -119,6 +150,10 @@ export class PositionManager {
     stopLossPercent?: number,
     takeProfitPercent?: number,
     trailingStopPercent?: number | null,
+    opts?: {
+      entryQuoteAmount?: number | null;
+      entryFeesQuote?: number | null;
+    },
   ): Position {
     const id = randomUUID();
     const sl =
@@ -143,23 +178,56 @@ export class PositionManager {
       highWaterMark: entryPrice,
       strategy,
       mode,
+      entryQuoteAmount: opts?.entryQuoteAmount ?? null,
+      entryFeesQuote: opts?.entryFeesQuote ?? null,
     };
     this.open.push(pos);
     this.saveToDisk();
     console.log(
-      `[POSITION-OPEN] ${id} mint=${mint} amount=${amount} entry=${entryPrice} sl=${sl ?? 'null'} tp=${tp ?? 'null'} trailing=${trail === null ? 'null' : trail} strategy=${strategy}`,
+      `[POSITION-OPEN] ${id} mint=${mint} amount=${amount} entry=${entryPrice} sl=${sl ?? 'null'} tp=${tp ?? 'null'} trailing=${trail === null ? 'null' : trail} strategy=${strategy} entryQuote=${pos.entryQuoteAmount ?? 'null'} entryFees=${pos.entryFeesQuote ?? 'null'}`,
     );
     return pos;
   }
 
-  closePosition(id: string, exitPrice: number, reason: string): ClosedPosition {
+  closePosition(
+    id: string,
+    exitPrice: number,
+    reason: string,
+    opts?: {
+      exitQuoteAmount?: number | null;
+      exitFeesQuote?: number | null;
+    },
+  ): ClosedPosition {
     const idx = this.open.findIndex((p) => p.id === id);
     if (idx === -1) {
       throw new Error(`Position not found: ${id}`);
     }
     const p = this.open[idx]!;
     const solHuman = Number(p.amount) / 1e9;
-    const realizedPnlQuote = (exitPrice - p.entryPrice) * solHuman;
+    const realizedPnlGross = (exitPrice - p.entryPrice) * solHuman;
+
+    const exitQuoteAmount =
+      opts?.exitQuoteAmount ?? null;
+    const exitFeesQuote =
+      opts?.exitFeesQuote ?? null;
+    const entryQuoteAmount = p.entryQuoteAmount ?? null;
+    const entryFeesQuote = p.entryFeesQuote ?? null;
+
+    let realizedPnlNet: number | null = null;
+    let feesQuote: number | null = null;
+    if (
+      entryQuoteAmount !== null &&
+      exitQuoteAmount !== null &&
+      Number.isFinite(entryQuoteAmount) &&
+      Number.isFinite(exitQuoteAmount)
+    ) {
+      const entryFees = entryFeesQuote ?? 0;
+      const exitFees = exitFeesQuote ?? 0;
+      // Net = flow delta - SOL-side fees (taker haircut is already baked into the flows).
+      realizedPnlNet = (exitQuoteAmount - entryQuoteAmount) - entryFees - exitFees;
+      feesQuote = entryFees + exitFees;
+    }
+
     const closed: ClosedPosition = {
       id: p.id,
       mint: p.mint,
@@ -168,7 +236,14 @@ export class PositionManager {
       entryTime: p.entryTime,
       exitTime: new Date().toISOString(),
       amount: p.amount,
-      realizedPnlQuote,
+      realizedPnlQuote: realizedPnlGross,
+      realizedPnlGross,
+      realizedPnlNet,
+      feesQuote,
+      entryQuoteAmount,
+      exitQuoteAmount,
+      entryFeesQuote,
+      exitFeesQuote,
       exitReason: reason,
       strategy: p.strategy,
       mode: p.mode,
@@ -176,8 +251,10 @@ export class PositionManager {
     this.open.splice(idx, 1);
     this.closed.push(closed);
     this.saveToDisk();
+    const netStr =
+      realizedPnlNet === null ? 'n/a' : realizedPnlNet.toFixed(4);
     console.log(
-      `[POSITION] Closed ${id.slice(0, 8)}… reason=${reason} pnl=${realizedPnlQuote.toFixed(4)}`,
+      `[POSITION] Closed ${id.slice(0, 8)}\u2026 reason=${reason} pnlGross=${realizedPnlGross.toFixed(4)} pnlNet=${netStr} fees=${feesQuote === null ? 'n/a' : feesQuote.toFixed(4)}`,
     );
     return closed;
   }

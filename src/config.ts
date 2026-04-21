@@ -29,6 +29,21 @@ export interface AppConfig {
   telegramChatId: string;
   reportCron: string;
   reportTimezone: string;
+  /**
+   * Paper taker fee in basis points (bps). Applied as a haircut on the
+   * Jupiter-quoted output amount of every paper swap. 1 bps = 0.01%.
+   */
+  paperTakerFeeBps: number;
+  /**
+   * Base Solana network fee per tx in lamports (paid out of SOL balance
+   * on every paper swap).
+   */
+  paperNetworkFeeLamports: number;
+  /**
+   * Priority / compute-unit fee per tx in lamports (paid out of SOL
+   * balance on every paper swap; tune to approximate congestion).
+   */
+  paperPriorityFeeLamports: number;
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -104,4 +119,7 @@ export const config: AppConfig = {
   telegramChatId: (process.env.TELEGRAM_CHAT_ID ?? '').trim(),
   reportCron: optionalEnv('REPORT_CRON', '0 17 * * *'),
   reportTimezone: optionalEnv('REPORT_TIMEZONE', 'America/Chicago'),
+  paperTakerFeeBps: parseIntEnv('PAPER_TAKER_FEE_BPS', 10),
+  paperNetworkFeeLamports: parseIntEnv('PAPER_NETWORK_FEE_LAMPORTS', 5_000),
+  paperPriorityFeeLamports: parseIntEnv('PAPER_PRIORITY_FEE_LAMPORTS', 50_000),
 };

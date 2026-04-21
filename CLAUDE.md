@@ -12,7 +12,7 @@ A Solana mean-reversion trading agent built on the Jupiter Ultra API. Supports p
 - **Position tracking** (`src/positions.ts`) with per-position stop loss, take profit, and trailing stop baked in at open time; open/closed positions persisted to `data/positions.json` and `data/closed-positions.json`
 - **Risk manager** (`src/risk.ts`) enforces daily loss limit, max open positions, cooldown after loss, and circuit breaker
 - **Runtime config** persisted to `data/runtime-config.json` so `/config` overrides survive `pm2 restart`
-- **Paper trading engine** (`src/paper.ts`) uses real Jupiter quotes with a 0.1% slippage haircut; virtual portfolio persisted to `data/paper-portfolio.json`
+- **Paper trading engine** (`src/paper.ts`) uses real Jupiter quotes with a configurable fee model: taker bps haircut (`PAPER_TAKER_FEE_BPS`, default 10), base network fee (`PAPER_NETWORK_FEE_LAMPORTS`, default 5000), and priority fee (`PAPER_PRIORITY_FEE_LAMPORTS`, default 50_000) — SOL gas is debited from SOL balance on every swap. Virtual portfolio persisted to `data/paper-portfolio.json`
 - **Dashboard HTML** served at `GET /` (`src/dashboard.ts`) — mobile-friendly, no external dependencies
 - **Daily Telegram report** at 5 PM Central (`src/scheduler.ts`, `src/report.ts`, `src/telegram.ts`) — also triggerable via `POST /report/send`
 - **OpenClaw skill** in `openclaw-skill/` handles `/trade` commands via chat; see `openclaw-skill/SKILL.md` for full command reference

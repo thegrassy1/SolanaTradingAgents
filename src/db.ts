@@ -59,6 +59,32 @@ function migrateTradesColumns(): void {
   add('exit_price', 'ALTER TABLE trades ADD COLUMN exit_price REAL');
   add('exit_reason', 'ALTER TABLE trades ADD COLUMN exit_reason TEXT');
   add('realized_pnl', 'ALTER TABLE trades ADD COLUMN realized_pnl REAL');
+  add(
+    'realized_pnl_gross',
+    'ALTER TABLE trades ADD COLUMN realized_pnl_gross REAL',
+  );
+  add(
+    'realized_pnl_net',
+    'ALTER TABLE trades ADD COLUMN realized_pnl_net REAL',
+  );
+  add('fees_quote', 'ALTER TABLE trades ADD COLUMN fees_quote REAL');
+  add(
+    'taker_fee_bps',
+    'ALTER TABLE trades ADD COLUMN taker_fee_bps INTEGER',
+  );
+  add(
+    'taker_fee_quote',
+    'ALTER TABLE trades ADD COLUMN taker_fee_quote REAL',
+  );
+  add(
+    'network_fee_lamports',
+    'ALTER TABLE trades ADD COLUMN network_fee_lamports INTEGER',
+  );
+  add(
+    'priority_fee_lamports',
+    'ALTER TABLE trades ADD COLUMN priority_fee_lamports INTEGER',
+  );
+  add('sol_fee_quote', 'ALTER TABLE trades ADD COLUMN sol_fee_quote REAL');
 }
 
 migrateTradesColumns();
@@ -83,12 +109,18 @@ export function logTrade(trade: TradeRecord): void {
       timestamp, mode, input_mint, output_mint, input_amount, output_amount,
       expected_output, price_impact, slippage_bps, tx_signature, status,
       error_message, strategy, price_at_trade,
-      entry_price, exit_price, exit_reason, realized_pnl
+      entry_price, exit_price, exit_reason, realized_pnl,
+      realized_pnl_gross, realized_pnl_net, fees_quote,
+      taker_fee_bps, taker_fee_quote,
+      network_fee_lamports, priority_fee_lamports, sol_fee_quote
     ) VALUES (
       @timestamp, @mode, @input_mint, @output_mint, @input_amount, @output_amount,
       @expected_output, @price_impact, @slippage_bps, @tx_signature, @status,
       @error_message, @strategy, @price_at_trade,
-      @entry_price, @exit_price, @exit_reason, @realized_pnl
+      @entry_price, @exit_price, @exit_reason, @realized_pnl,
+      @realized_pnl_gross, @realized_pnl_net, @fees_quote,
+      @taker_fee_bps, @taker_fee_quote,
+      @network_fee_lamports, @priority_fee_lamports, @sol_fee_quote
     )
   `);
   stmt.run({
@@ -110,6 +142,14 @@ export function logTrade(trade: TradeRecord): void {
     exit_price: trade.exitPrice ?? null,
     exit_reason: trade.exitReason ?? null,
     realized_pnl: trade.realizedPnl ?? null,
+    realized_pnl_gross: trade.realizedPnlGross ?? trade.realizedPnl ?? null,
+    realized_pnl_net: trade.realizedPnlNet ?? null,
+    fees_quote: trade.feesQuote ?? null,
+    taker_fee_bps: trade.takerFeeBps ?? null,
+    taker_fee_quote: trade.takerFeeQuote ?? null,
+    network_fee_lamports: trade.networkFeeLamports ?? null,
+    priority_fee_lamports: trade.priorityFeeLamports ?? null,
+    sol_fee_quote: trade.solFeeQuote ?? null,
   });
 }
 
@@ -147,6 +187,14 @@ export type DbTradeRow = {
   exit_price: number | null;
   exit_reason: string | null;
   realized_pnl: number | null;
+  realized_pnl_gross: number | null;
+  realized_pnl_net: number | null;
+  fees_quote: number | null;
+  taker_fee_bps: number | null;
+  taker_fee_quote: number | null;
+  network_fee_lamports: number | null;
+  priority_fee_lamports: number | null;
+  sol_fee_quote: number | null;
 };
 
 export function getRecentTrades(limit: number, mode?: 'paper' | 'live'): DbTradeRow[] {

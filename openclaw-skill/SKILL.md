@@ -10,6 +10,25 @@ The agent also serves a **web dashboard** at **GET /** — point the user to `ht
 
 Use this skill when the user mentions trading, crypto, Solana, Jupiter, their portfolio, paper trading, live trading, or uses commands like `/trade`, `/trader`, or asks for status, quotes, P&L, or trade history for this agent.
 
+## Fees & net P&L (important)
+
+Every paper swap now models three kinds of cost, so dashboards and reports should always surface **net** P&L, not gross:
+
+1. **Taker fee** — a bps haircut on the Jupiter-quoted output (configurable via `PAPER_TAKER_FEE_BPS`, default 10 bps). Reflected directly in `outputAmount`.
+2. **Base network fee** — `PAPER_NETWORK_FEE_LAMPORTS` (default 5000) debited from the SOL balance on every swap.
+3. **Priority / compute-unit fee** — `PAPER_PRIORITY_FEE_LAMPORTS` (default 50_000) debited from the SOL balance on every swap.
+
+Every `TradeRecord` now carries the fee breakdown:
+
+- `takerFeeBps`, `takerFeeQuote` — taker fee bps applied and its USDC value.
+- `networkFeeLamports`, `priorityFeeLamports`, `solFeeQuote` — SOL-side fees paid for this leg (total SOL fee in USDC).
+- `feesQuote` — total cost of this trade leg in quote currency.
+- `realizedPnlGross` — legacy mark-to-market P&L, `(exit - entry) * size`.
+- `realizedPnlNet` — **true realized P&L from actual balance flows**: `(exitQuoteAmount - entryQuoteAmount) - entryFees - exitFees`. Present only for positions opened after the fee-aware refactor.
+- `realizedPnl` — alias of `realizedPnlGross`, kept for backward compatibility.
+
+**Reporting rule of thumb:** when summarising P&L (daily, per-trade, or per-position) always **prefer `realizedPnlNet` / `dailyRealizedPnLNet` / `unrealizedPnlNet`** when they're non-null; fall back to the gross field only for legacy rows. When both are known and differ, it's fine to mention gross parenthetically (e.g. `"+$4.94 net (gross +$5.05, fees $0.11)"`).
+
 ## Available endpoints
 
 Base URL (on the agent host): `http://172.20.0.1:3456` — adjust host/port if the user’s setup uses Docker or a remote host.
@@ -26,7 +45,7 @@ curl -s http://172.20.0.1:3456/health
 
 ### GET /status
 
-Full agent status: mode, running, latest price, SMA, volatility, cooldown, paper portfolio balances and P&L, recent trades, trade summary, uptime, **risk** snapshot, **dailyRealizedPnL**, **dailyStartingValueQuote**, **openPositionsCount**.
+Full agent status: mode, running, latest price, SMA, volatility, cooldown, paper portfolio balances and P&L, recent trades, trade summary, uptime, **risk** snapshot, **dailyRealizedPnL** (gross), **dailyRealizedPnLNet** (net of fees — prefer this), **dailyStartingValueQuote**, **openPositionsCount**.
 
 ```bash
 curl -s http://172.20.0.1:3456/status
@@ -101,6 +120,8 @@ Update runtime settings. Body: `{ "key": "...", "value": "..." }`. Cannot set `m
 
 **Risk (percents as decimals, e.g. `0.03` = 3%):** `stop_loss`, `take_profit`, `trailing_stop` (use string `null` to disable), `max_daily_loss`, `max_open_positions` (integer), `risk_per_trade`, `cooldown_loss_minutes` (longer cooldown after a losing exit).
 
+> The paper fee model (`PAPER_TAKER_FEE_BPS`, `PAPER_NETWORK_FEE_LAMPORTS`, `PAPER_PRIORITY_FEE_LAMPORTS`) is configured via environment variables and applied on every paper swap. It is **not** hot-editable via `/config` today — changing it requires restarting the agent.
+
 ```bash
 curl -s -X POST http://172.20.0.1:3456/config -H "Content-Type: application/json" -d "{\"key\":\"threshold\",\"value\":\"3\"}"
 ```
@@ -111,7 +132,14 @@ curl -s -X POST http://172.20.0.1:3456/config -H "Content-Type: application/json
 
 ### GET /positions
 
-Open SOL positions (risk layer): list with `unrealizedPnlQuote` per row and `unrealizedPnLTotal`.
+Open SOL positions (risk layer). Each row carries:
+
+- `unrealizedPnlQuote` / `unrealizedPnlGross` — mark-to-market gross.
+- `unrealizedPnlNet` — projected exit P&L net of estimated close-side fees (taker + SOL network). Prefer this for summaries.
+- `entryQuoteAmount` — USDC actually spent to open the position (null for legacy positions).
+- `entryFeesQuote` — entry-leg fees in USDC (null for legacy).
+
+Totals: `unrealizedPnLTotal` (gross) and `unrealizedPnLTotalNet`.
 
 ```bash
 curl -s http://172.20.0.1:3456/positions
@@ -137,7 +165,14 @@ curl -s -X POST http://172.20.0.1:3456/positions/close -H "Content-Type: applica
 
 ### GET /positions/closed
 
-Recently closed positions with realized P&L and `exitReason`. Query: **limit** (default 20, max 500).
+Recently closed positions. Query: **limit** (default 20, max 500). Each row carries:
+
+- `realizedPnlQuote` / `realizedPnlGross` — legacy gross P&L.
+- `realizedPnlNet` — true net P&L from balance flows (null for positions opened before the fee-aware refactor).
+- `feesQuote` — total round-trip fees in USDC.
+- `entryQuoteAmount`, `exitQuoteAmount` — actual USDC flows on entry / exit (human units).
+- `entryFeesQuote`, `exitFeesQuote` — per-leg fees in USDC.
+- `exitReason`, `strategy`, `mode`, `entryPrice`, `exitPrice`, `entryTime`, `exitTime`, `amount`.
 
 ```bash
 curl -s "http://172.20.0.1:3456/positions/closed?limit=15"
@@ -145,7 +180,14 @@ curl -s "http://172.20.0.1:3456/positions/closed?limit=15"
 
 ### GET /risk
 
-Current risk parameters, daily realized P&L vs day-start NAV baseline, `lastTradeResult`, open position count, UTC day key.
+Current risk parameters and daily state:
+
+- `dailyRealizedPnL` — gross daily realized P&L (legacy).
+- `dailyRealizedPnLNet` — net daily realized P&L (prefer this).
+- `dailyStartingValueQuote` — day-start NAV baseline.
+- `lastTradeResult`, `openPositions`, `utcDay`.
+- `paperFees: { takerFeeBps, networkFeeLamports, priorityFeeLamports }` — the active paper fee model.
+- All risk limits (`stopLossPercent`, `takeProfitPercent`, `trailingStopPercent`, `maxDailyLossPercent`, `maxOpenPositions`, `riskPerTradePercent`).
 
 ```bash
 curl -s http://172.20.0.1:3456/risk

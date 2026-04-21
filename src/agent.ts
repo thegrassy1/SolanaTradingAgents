@@ -30,6 +30,11 @@ function humanToRawAmount(mint: string, human: number): bigint {
   return BigInt(Math.round(human * 10 ** getTokenDecimals(mint)));
 }
 
+function rawToHumanAmount(mint: string, raw: string | bigint): number {
+  const b = typeof raw === 'bigint' ? raw : BigInt(raw);
+  return Number(b) / 10 ** getTokenDecimals(mint);
+}
+
 export class TradingAgent {
   private readonly cfg: AppConfig;
   readonly priceMonitor: PriceMonitor;
@@ -46,7 +51,10 @@ export class TradingAgent {
   private tradeAmountLamports: number;
   private dailyDateKeyUtc: string;
   private dailyStartingValueQuote = 0;
+  /** Sum of gross realized P&L (mark-to-market) for the UTC day. */
   private dailyRealizedPnL = 0;
+  /** Sum of net realized P&L (flows minus all fees) for the UTC day. */
+  private dailyRealizedPnLNet = 0;
   private lastTradeResult: TradeOutcome = null;
   /** Last `[POSITION-HOLD]` log time per open position id (rate limit). */
   private positionHoldLastLogMs = new Map<string, number>();
@@ -226,6 +234,7 @@ export class TradingAgent {
       this.dailyDateKeyUtc = key;
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
       this.dailyRealizedPnL = 0;
+      this.dailyRealizedPnLNet = 0;
       saveDailyState({ date: key, startingValueQuote: this.dailyStartingValueQuote });
       console.log(
         `[AGENT] UTC day ${key}: daily NAV baseline=${this.dailyStartingValueQuote.toFixed(2)}`,
@@ -289,6 +298,7 @@ export class TradingAgent {
           outputMint,
           inputRaw,
           strategy,
+          priceSolUsdc,
         );
         rec.priceAtTrade = priceSolUsdc;
         Object.assign(rec, options?.logExtras);
@@ -322,6 +332,7 @@ export class TradingAgent {
           outputMint,
           inputRaw,
           'shadow_live',
+          priceSolUsdc,
         );
         if (inputMint === SOL) {
           this.liveVirtualSol -= BigInt(rec.inputAmount);
@@ -387,15 +398,20 @@ export class TradingAgent {
         { skipLog: true },
       );
       if (rec.status !== 'paper_filled' && rec.status !== 'success') continue;
+      const exitQuoteAmount = rawToHumanAmount(USDC, rec.outputAmount);
+      const exitFeesQuote = rec.solFeeQuote ?? 0;
       const closed = this.positionManager.closePosition(
         sig.positionId,
         currentPrice,
         sig.reason,
+        { exitQuoteAmount, exitFeesQuote },
       );
       anyClosed = true;
-      this.dailyRealizedPnL += closed.realizedPnlQuote;
-      this.lastTradeResult =
-        closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+      this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
+      this.dailyRealizedPnLNet +=
+        closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      this.lastTradeResult = netForOutcome >= 0 ? 'win' : 'loss';
       logTrade({
         timestamp: rec.timestamp,
         inputMint: rec.inputMint,
@@ -414,6 +430,14 @@ export class TradingAgent {
         exitPrice: currentPrice,
         exitReason: sig.reason,
         realizedPnl: closed.realizedPnlQuote,
+        realizedPnlGross: closed.realizedPnlGross ?? closed.realizedPnlQuote,
+        realizedPnlNet: closed.realizedPnlNet ?? undefined,
+        feesQuote: closed.feesQuote ?? rec.feesQuote,
+        takerFeeBps: rec.takerFeeBps,
+        takerFeeQuote: rec.takerFeeQuote,
+        networkFeeLamports: rec.networkFeeLamports,
+        priorityFeeLamports: rec.priorityFeeLamports,
+        solFeeQuote: rec.solFeeQuote,
       });
       this.armCooldown(this.lastTradeResult);
     }
@@ -549,14 +573,20 @@ export class TradingAgent {
         logTrade(rec);
         return rec;
       }
+      const exitQuoteAmount =
+        outputMint === USDC ? rawToHumanAmount(USDC, rec.outputAmount) : null;
+      const exitFeesQuote = rec.solFeeQuote ?? 0;
       const closed = this.positionManager.closePosition(
         trackedSell.id,
         priceSolUsdc,
         'manual',
+        { exitQuoteAmount, exitFeesQuote },
       );
-      this.dailyRealizedPnL += closed.realizedPnlQuote;
-      this.lastTradeResult =
-        closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+      this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
+      this.dailyRealizedPnLNet +=
+        closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      this.lastTradeResult = netForOutcome >= 0 ? 'win' : 'loss';
       const merged: TradeRecord = {
         timestamp: rec.timestamp,
         inputMint: rec.inputMint,
@@ -575,6 +605,14 @@ export class TradingAgent {
         exitPrice: priceSolUsdc,
         exitReason: 'manual',
         realizedPnl: closed.realizedPnlQuote,
+        realizedPnlGross: closed.realizedPnlGross ?? closed.realizedPnlQuote,
+        realizedPnlNet: closed.realizedPnlNet ?? undefined,
+        feesQuote: closed.feesQuote ?? rec.feesQuote,
+        takerFeeBps: rec.takerFeeBps,
+        takerFeeQuote: rec.takerFeeQuote,
+        networkFeeLamports: rec.networkFeeLamports,
+        priorityFeeLamports: rec.priorityFeeLamports,
+        solFeeQuote: rec.solFeeQuote,
       };
       logTrade(merged);
       this.armCooldown(this.lastTradeResult);
@@ -595,6 +633,9 @@ export class TradingAgent {
         return rec;
       }
       const outAmt = BigInt(rec.outputAmount);
+      const entryQuoteAmount =
+        inputMint === USDC ? rawToHumanAmount(USDC, rec.inputAmount) : null;
+      const entryFeesQuote = rec.solFeeQuote ?? 0;
       this.positionManager.openPosition(
         outputMint,
         outAmt,
@@ -604,6 +645,7 @@ export class TradingAgent {
         this.riskManager.stopLossPercent,
         this.riskManager.takeProfitPercent,
         this.riskManager.trailingStopPercent,
+        { entryQuoteAmount, entryFeesQuote },
       );
       const logged: TradeRecord = {
         ...rec,
@@ -662,14 +704,19 @@ export class TradingAgent {
       logTrade(rec);
       return rec;
     }
+    const exitQuoteAmount = rawToHumanAmount(USDC, rec.outputAmount);
+    const exitFeesQuote = rec.solFeeQuote ?? 0;
     const closed = this.positionManager.closePosition(
       positionId,
       priceSolUsdc,
       reason,
+      { exitQuoteAmount, exitFeesQuote },
     );
-    this.dailyRealizedPnL += closed.realizedPnlQuote;
-    this.lastTradeResult =
-      closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
+    this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
+    this.dailyRealizedPnLNet +=
+      closed.realizedPnlNet ?? closed.realizedPnlQuote;
+    const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+    this.lastTradeResult = netForOutcome >= 0 ? 'win' : 'loss';
     const merged: TradeRecord = {
       timestamp: rec.timestamp,
       inputMint: rec.inputMint,
@@ -688,6 +735,14 @@ export class TradingAgent {
       exitPrice: priceSolUsdc,
       exitReason: reason,
       realizedPnl: closed.realizedPnlQuote,
+      realizedPnlGross: closed.realizedPnlGross ?? closed.realizedPnlQuote,
+      realizedPnlNet: closed.realizedPnlNet ?? undefined,
+      feesQuote: closed.feesQuote ?? rec.feesQuote,
+      takerFeeBps: rec.takerFeeBps,
+      takerFeeQuote: rec.takerFeeQuote,
+      networkFeeLamports: rec.networkFeeLamports,
+      priorityFeeLamports: rec.priorityFeeLamports,
+      solFeeQuote: rec.solFeeQuote,
     };
     logTrade(merged);
     this.armCooldown(this.lastTradeResult);
@@ -811,6 +866,8 @@ export class TradingAgent {
       );
       if (rec.status === 'paper_filled' || rec.status === 'success') {
         const solOut = BigInt(rec.outputAmount);
+        const entryQuoteAmount = rawToHumanAmount(USDC, rec.inputAmount);
+        const entryFeesQuote = rec.solFeeQuote ?? 0;
         this.positionManager.openPosition(
           SOL,
           solOut,
@@ -820,6 +877,7 @@ export class TradingAgent {
           this.riskManager.stopLossPercent,
           this.riskManager.takeProfitPercent,
           this.riskManager.trailingStopPercent,
+          { entryQuoteAmount, entryFeesQuote },
         );
         this.armCooldown(null);
       }
@@ -866,6 +924,8 @@ export class TradingAgent {
     uptimeMs: number;
     risk: ReturnType<RiskManager['snapshot']>;
     dailyRealizedPnL: number;
+    /** Daily realized P&L net of paper fees (taker + SOL network). */
+    dailyRealizedPnLNet: number;
     dailyStartingValueQuote: number;
     openPositionsCount: number;
   }> {
@@ -893,6 +953,7 @@ export class TradingAgent {
       uptimeMs: this.startedAt ? Date.now() - this.startedAt.getTime() : 0,
       risk: this.riskManager.snapshot(),
       dailyRealizedPnL: this.dailyRealizedPnL,
+      dailyRealizedPnLNet: this.dailyRealizedPnLNet,
       dailyStartingValueQuote: this.dailyStartingValueQuote,
       openPositionsCount: this.positionManager.getOpenPositions().length,
     };
@@ -903,12 +964,29 @@ export class TradingAgent {
       Record<string, unknown> & { unrealizedPnlQuote: number }
     >;
     unrealizedPnLTotal: number;
+    unrealizedPnLTotalNet: number;
   } {
     const px = currentPrice ?? this.priceMonitor.getLatestPrice() ?? 0;
+    // Estimate exit-side fees at current price so we can project net on close.
+    const feeLamports =
+      (this.cfg.paperNetworkFeeLamports + this.cfg.paperPriorityFeeLamports) | 0;
+    const solFeeQuoteEst = px > 0 ? (feeLamports / 1e9) * px : 0;
+    const takerBps = Math.max(0, this.cfg.paperTakerFeeBps | 0);
+    let totalNet = 0;
     const positions = this.positionManager.getOpenPositions().map((p) => {
       const solHuman = Number(p.amount) / 1e9;
-      const unrealized =
+      const unrealizedGross =
         p.mint === SOL ? (px - p.entryPrice) * solHuman : 0;
+      let unrealizedNet = unrealizedGross;
+      if (p.mint === SOL && p.entryQuoteAmount != null && px > 0) {
+        // Simulate exiting: sell all SOL at current price, pay taker bps + exit SOL fee.
+        const grossExitUsdc = solHuman * px;
+        const takerHaircut = grossExitUsdc * (takerBps / 10_000);
+        const estExitUsdc = grossExitUsdc - takerHaircut;
+        const entryFees = p.entryFeesQuote ?? 0;
+        unrealizedNet = estExitUsdc - p.entryQuoteAmount - entryFees - solFeeQuoteEst;
+      }
+      totalNet += unrealizedNet;
       return {
         id: p.id,
         mint: p.mint,
@@ -921,12 +999,20 @@ export class TradingAgent {
         highWaterMark: p.highWaterMark,
         strategy: p.strategy,
         mode: p.mode,
-        unrealizedPnlQuote: unrealized,
+        entryQuoteAmount: p.entryQuoteAmount ?? null,
+        entryFeesQuote: p.entryFeesQuote ?? null,
+        unrealizedPnlQuote: unrealizedGross,
+        unrealizedPnlGross: unrealizedGross,
+        unrealizedPnlNet: unrealizedNet,
       };
     });
     const unrealizedPnLTotal =
       px > 0 ? this.positionManager.getUnrealizedPnL(px) : 0;
-    return { positions, unrealizedPnLTotal };
+    return {
+      positions,
+      unrealizedPnLTotal,
+      unrealizedPnLTotalNet: totalNet,
+    };
   }
 
   getClosedPositionsApi(limit: number): unknown[] {
@@ -939,6 +1025,13 @@ export class TradingAgent {
       exitTime: c.exitTime,
       amount: c.amount.toString(),
       realizedPnlQuote: c.realizedPnlQuote,
+      realizedPnlGross: c.realizedPnlGross ?? c.realizedPnlQuote,
+      realizedPnlNet: c.realizedPnlNet ?? null,
+      feesQuote: c.feesQuote ?? null,
+      entryQuoteAmount: c.entryQuoteAmount ?? null,
+      exitQuoteAmount: c.exitQuoteAmount ?? null,
+      entryFeesQuote: c.entryFeesQuote ?? null,
+      exitFeesQuote: c.exitFeesQuote ?? null,
       exitReason: c.exitReason,
       strategy: c.strategy,
       mode: c.mode,
@@ -949,10 +1042,16 @@ export class TradingAgent {
     return {
       ...this.riskManager.snapshot(),
       dailyRealizedPnL: this.dailyRealizedPnL,
+      dailyRealizedPnLNet: this.dailyRealizedPnLNet,
       dailyStartingValueQuote: this.dailyStartingValueQuote,
       lastTradeResult: this.lastTradeResult,
       openPositions: this.positionManager.getOpenPositions().length,
       utcDay: this.dailyDateKeyUtc,
+      paperFees: {
+        takerFeeBps: this.cfg.paperTakerFeeBps,
+        networkFeeLamports: this.cfg.paperNetworkFeeLamports,
+        priorityFeeLamports: this.cfg.paperPriorityFeeLamports,
+      },
     };
   }
 
