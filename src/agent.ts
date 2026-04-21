@@ -12,6 +12,12 @@ import { RiskManager, type TradeOutcome } from './risk';
 import { swap } from './swap';
 import type { TradeRecord } from './types';
 import { getTokenDecimals } from './tokenInfo';
+import {
+  loadRuntimeConfigFile,
+  saveRuntimeConfigFile,
+  snapshotToPersistable,
+} from './runtimeConfigPersist';
+import type { ExitSignal } from './positions';
 import { loadWallet } from './wallet';
 
 const SOL = config.baseMint;
@@ -62,6 +68,34 @@ export class TradingAgent {
     );
     this.positionManager = new PositionManager();
     this.riskManager = new RiskManager(cfg);
+    this.loadPersistedRuntimeKeys();
+  }
+
+  private loadPersistedRuntimeKeys(): void {
+    const data = loadRuntimeConfigFile();
+    if (!data) return;
+    let n = 0;
+    for (const [k, v] of Object.entries(data)) {
+      if (this.applyRuntimeConfigValue(k, v)) n += 1;
+    }
+    if (n > 0) {
+      console.log(`[CONFIG] Loaded ${n} runtime overrides from disk`);
+    }
+  }
+
+  /** Apply one /config key; returns true if a known key was applied. */
+  private applyRuntimeConfigValue(key: string, value: string): boolean {
+    const k = key.toLowerCase().replace(/-/g, '_');
+    if (this.riskManager.setFromKey(key, value)) return true;
+    if (k === 'trade_amount' || k === 'trade_amount_lamports') {
+      this.tradeAmountLamports = Number(value);
+      return true;
+    }
+    if (k === 'threshold') {
+      this.thresholdPct = Number(value);
+      return true;
+    }
+    return false;
   }
 
   start(): void {
@@ -286,9 +320,12 @@ export class TradingAgent {
     );
   }
 
-  private async processRiskExits(currentPrice: number): Promise<void> {
-    this.positionManager.updateHighWaterMarks(currentPrice);
-    const signals = this.positionManager.checkExits(currentPrice);
+  /** @returns true if at least one position was closed (skip strategy this tick). */
+  private async processRiskExitSignals(
+    signals: ExitSignal[],
+    currentPrice: number,
+  ): Promise<boolean> {
+    let anyClosed = false;
     for (const sig of signals) {
       const pos = this.positionManager
         .getOpenPositions()
@@ -308,6 +345,7 @@ export class TradingAgent {
         currentPrice,
         sig.reason,
       );
+      anyClosed = true;
       this.dailyRealizedPnL += closed.realizedPnlQuote;
       this.lastTradeResult =
         closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
@@ -332,6 +370,7 @@ export class TradingAgent {
       });
       this.armCooldown(this.lastTradeResult);
     }
+    return anyClosed;
   }
 
   /**
@@ -621,7 +660,12 @@ export class TradingAgent {
     if (price === null || sma === null) return;
 
     await this.ensureDailyNav();
-    await this.processRiskExits(price);
+    this.positionManager.updateHighWaterMarks(price);
+    const exits = this.positionManager.checkExits(price);
+    if (exits.length > 0) {
+      const riskHandled = await this.processRiskExitSignals(exits, price);
+      if (riskHandled) return;
+    }
 
     const now = Date.now();
     if (now < this.cooldownUntil) {
@@ -912,17 +956,13 @@ export class TradingAgent {
   }
 
   setRuntimeConfig(key: string, value: string): void {
-    const k = key.toLowerCase().replace(/-/g, '_');
-    if (this.riskManager.setFromKey(key, value)) {
-      return;
-    }
-    if (k === 'trade_amount' || k === 'trade_amount_lamports') {
-      this.tradeAmountLamports = Number(value);
-      return;
-    }
-    if (k === 'threshold') {
-      this.thresholdPct = Number(value);
-      return;
+    const v = String(value);
+    const ok = this.applyRuntimeConfigValue(key, v);
+    if (ok) {
+      saveRuntimeConfigFile(
+        snapshotToPersistable(this.getRuntimeConfigView()),
+      );
+      console.log(`[CONFIG] Runtime override applied: ${key}=${v} (persisted)`);
     }
   }
 

@@ -146,7 +146,9 @@ export class PositionManager {
     };
     this.open.push(pos);
     this.saveToDisk();
-    console.log(`[POSITION] Opened ${id.slice(0, 8)}… ${mint} amt=${amount} @${entryPrice}`);
+    console.log(
+      `[POSITION-OPEN] ${id} mint=${mint} amount=${amount} entry=${entryPrice} sl=${sl ?? 'null'} tp=${tp ?? 'null'} trailing=${trail === null ? 'null' : trail} strategy=${strategy}`,
+    );
     return pos;
   }
 
@@ -207,26 +209,37 @@ export class PositionManager {
   }
 
   checkExits(currentPrice: number): ExitSignal[] {
+    const logChecks = process.env.LOG_EXIT_CHECKS === 'true';
     const out: ExitSignal[] = [];
     for (const p of this.open) {
-      if (p.takeProfitPrice !== null && currentPrice >= p.takeProfitPrice) {
-        out.push({
-          positionId: p.id,
-          reason: 'take_profit',
-          mint: p.mint,
-          amount: p.amount,
-        });
-        continue;
-      }
+      let decision: ExitReason | 'none' = 'none';
       if (p.stopLossPrice !== null && currentPrice <= p.stopLossPrice) {
         const reason: ExitReason =
           p.trailingStopPercent !== null ? 'trailing_stop' : 'stop_loss';
+        decision = reason;
         out.push({
           positionId: p.id,
           reason,
           mint: p.mint,
           amount: p.amount,
         });
+      } else if (
+        p.takeProfitPrice !== null &&
+        currentPrice >= p.takeProfitPrice
+      ) {
+        decision = 'take_profit';
+        out.push({
+          positionId: p.id,
+          reason: 'take_profit',
+          mint: p.mint,
+          amount: p.amount,
+        });
+      }
+      if (logChecks) {
+        const sigStr = decision === 'none' ? 'none' : decision;
+        console.log(
+          `[EXIT-CHECK] position ${p.id}: currentPrice=${currentPrice} stopLoss=${p.stopLossPrice ?? 'null'} takeProfit=${p.takeProfitPrice ?? 'null'} trailing=${p.trailingStopPercent ?? 'null'} → ${sigStr}`,
+        );
       }
     }
     return out;
