@@ -190,7 +190,13 @@ body{
 }
 
 /* Chart */
-.chart-wrap{height:280px;position:relative;margin-top:4px}
+.chart-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px}
+.chart-header h2{margin-bottom:0}
+.ibtns{display:flex;gap:4px}
+.ibtn{padding:3px 10px;border-radius:6px;border:1px solid var(--bd);background:transparent;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;letter-spacing:.04em}
+.ibtn:hover{border-color:var(--bd-2);color:var(--txt-2)}
+.ibtn.active{background:var(--card-2);border-color:var(--bd-2);color:var(--txt)}
+.chart-wrap{height:280px;position:relative;margin-top:8px}
 @media(max-width:760px){.chart-wrap{height:220px}}
 
 /* Positions */
@@ -322,7 +328,7 @@ body{
   const js = `
 (function(){
 var SOL='${SOL_M}',USDC='${USDC_M}';
-var refreshMs=10000,timer=null,priceChart=null;
+var refreshMs=10000,timer=null,priceChart=null,chartInterval=30000,rawPoints=[];
 
 function fmtUsd(n){if(n==null||!isFinite(n))return'\u2014';return '$'+Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
 function fmtNum(n,d){if(n==null||!isFinite(n))return'\u2014';return Number(n).toLocaleString(undefined,{minimumFractionDigits:d||2,maximumFractionDigits:d||2})}
@@ -344,24 +350,46 @@ function normTrade(t){return{timestamp:t.timestamp,inputMint:t.input_mint||t.inp
 function fmtTime(iso){try{var d=new Date(iso);return d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(x){return'\u2014'}}
 async function postJson(url,body){var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json()}
 
-function rollingAvg(prices,n){
-  return prices.map(function(_,i){
+function rollingAvg(arr,n){
+  return arr.map(function(_,i){
     if(i<n-1)return null;
-    var s=0;for(var j=i-n+1;j<=i;j++)s+=prices[j];
+    var s=0;for(var j=i-n+1;j<=i;j++)s+=arr[j];
     return s/n;
+  });
+}
+/* Downsample raw 30s points into intervalMs buckets; SMA is always computed
+   on the raw 30s data first so it reflects the true 10-min trading signal. */
+function aggregatePoints(raw,intervalMs){
+  var prices=raw.map(function(p){return p.price});
+  var smas=rollingAvg(prices,20);
+  if(intervalMs<=30000){
+    return raw.map(function(p,i){return{t:p.t,price:p.price,sma:smas[i]};});
+  }
+  var buckets={};
+  raw.forEach(function(p,i){
+    var key=Math.floor(p.t/intervalMs)*intervalMs;
+    if(!buckets[key]){buckets[key]={prices:[],smas:[]};}
+    buckets[key].prices.push(p.price);
+    if(smas[i]!=null)buckets[key].smas.push(smas[i]);
+  });
+  return Object.keys(buckets).sort(function(a,b){return Number(a)-Number(b)}).map(function(k){
+    var b=buckets[k];
+    var ap=b.prices.reduce(function(a,v){return a+v;},0)/b.prices.length;
+    var as=b.smas.length?b.smas.reduce(function(a,v){return a+v;},0)/b.smas.length:null;
+    return{t:Number(k),price:ap,sma:as};
   });
 }
 function renderChart(points){
   var canvas=document.getElementById('priceChart');
   if(!canvas||typeof Chart==='undefined')return;
-  var prices=points.map(function(p){return p.price});
-  var smaData=rollingAvg(prices,20);
+  var prices=points.map(function(p){return p.price;});
+  var smaData=points.map(function(p){return p.sma!=null?p.sma:null;});
   var labels=points.map(function(p){
     var d=new Date(p.t);
     return d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
   });
   var ctx=canvas.getContext('2d');
-  var grad=ctx.createLinearGradient(0,0,0,canvas.clientHeight);
+  var grad=ctx.createLinearGradient(0,0,0,canvas.clientHeight||280);
   grad.addColorStop(0,'rgba(59,130,246,0.35)');
   grad.addColorStop(1,'rgba(59,130,246,0)');
   if(priceChart){
@@ -387,13 +415,13 @@ function renderChart(points){
           titleColor:'#e6edf3',bodyColor:'#a8b3c1',padding:10,
           callbacks:{
             title:function(items){return items[0]?items[0].label:''},
-            label:function(c){return c.dataset.label+': $'+Number(c.parsed.y).toFixed(2)}
+            label:function(c){return c.dataset.label+': $'+Number(c.parsed.y).toFixed(2);}
           }
         }
       },
       scales:{
         x:{display:true,ticks:{color:'#6e7a8a',maxTicksLimit:8,maxRotation:0,font:{size:10}},grid:{color:'rgba(45,58,75,0.3)'}},
-        y:{ticks:{color:'#6e7a8a',maxTicksLimit:5,font:{size:11},callback:function(v){return '$'+Number(v).toFixed(2)}},grid:{color:'rgba(45,58,75,0.4)'}}
+        y:{ticks:{color:'#6e7a8a',maxTicksLimit:5,font:{size:11},callback:function(v){return'$'+Number(v).toFixed(2);}},grid:{color:'rgba(45,58,75,0.4)'}}
       }
     }
   });
@@ -454,8 +482,10 @@ async function refresh(){
   }
 
   if(series&&series.points&&series.points.length){
-    renderChart(series.points);
+    rawPoints=series.points;
+    renderChart(aggregatePoints(rawPoints,chartInterval));
   } else if(priceChart){
+    rawPoints=[];
     priceChart.data.labels=[];priceChart.data.datasets[0].data=[];priceChart.data.datasets[1].data=[];priceChart.update();
   }
 
@@ -589,6 +619,14 @@ function wire(){
   document.getElementById('btnReset').onclick=function(){if(!confirm('Reset paper portfolio? This cannot be undone.'))return;fetch('/reset',{method:'POST'}).then(function(){refresh()})};
   document.getElementById('selRefresh').onchange=function(){var v=this.value;if(v==='off')refreshMs=0;else refreshMs=parseInt(v,10);armTimer();refresh()};
   document.getElementById('btnRefresh').onclick=refresh;
+  document.querySelectorAll('.ibtn').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      chartInterval=parseInt(btn.getAttribute('data-ms'),10);
+      document.querySelectorAll('.ibtn').forEach(function(b){b.classList.remove('active');});
+      btn.classList.add('active');
+      if(rawPoints.length)renderChart(aggregatePoints(rawPoints,chartInterval));
+    });
+  });
   document.getElementById('fab').onclick=openDrawer;
   document.getElementById('drawerClose').onclick=closeDrawer;
   document.getElementById('drawerBack').onclick=closeDrawer;
@@ -650,7 +688,15 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 </div>
 
 <section class="card" style="margin-bottom:16px">
-  <h2>Price chart <span class="count">last ~100 min</span></h2>
+  <div class="chart-header">
+    <h2>Price chart</h2>
+    <div class="ibtns">
+      <button class="ibtn active" data-ms="30000">30s</button>
+      <button class="ibtn" data-ms="60000">1m</button>
+      <button class="ibtn" data-ms="300000">5m</button>
+      <button class="ibtn" data-ms="900000">15m</button>
+    </div>
+  </div>
   <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
 </section>
 
