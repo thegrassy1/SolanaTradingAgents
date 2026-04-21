@@ -1,6 +1,7 @@
 /**
  * One-off diagnostic: HTTP checks against the running agent + read-only SQLite.
  * Env: VERIFY_API_BASE_URL or API_BASE_URL (default http://127.0.0.1:3456), NO_COLOR=1 to disable ANSI.
+ * Optional: VERIFY_MEAN_REVERSION_SELL_SINCE=ISO8601 — fail if any exit_reason=mean_reversion_sell at/after that time.
  */
 import fs from 'fs';
 import path from 'path';
@@ -281,6 +282,39 @@ async function run(): Promise<void> {
       );
     }
 
+    // CHECK 8b — mean_reversion_sell must not appear after deploy (risk-only exits)
+    const mrsSince =
+      process.env.VERIFY_MEAN_REVERSION_SELL_SINCE?.trim() || '';
+    if (!mrsSince) {
+      push(
+        'SKIP',
+        'No mean_reversion_sell (post-deploy)',
+        `${c.dim}Set VERIFY_MEAN_REVERSION_SELL_SINCE to ISO8601 deploy time to assert zero mean_reversion_sell exits on new trades.${c.reset}`,
+      );
+    } else {
+      const badMrs = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM trades
+             WHERE exit_reason = 'mean_reversion_sell' AND timestamp >= ?`,
+          )
+          .get(mrsSince) as { c: number }
+      ).c;
+      if (badMrs === 0) {
+        push(
+          'PASS',
+          'No mean_reversion_sell (post-deploy)',
+          `0 rows with exit_reason=mean_reversion_sell since ${mrsSince}`,
+        );
+      } else {
+        push(
+          'FAIL',
+          'No mean_reversion_sell (post-deploy)',
+          `${badMrs} trade(s) with mean_reversion_sell since ${mrsSince} (expected risk-only exits)`,
+        );
+      }
+    }
+
     // CHECK 9
     const pnlRow = db
       .prepare(
@@ -402,6 +436,11 @@ async function run(): Promise<void> {
     push('SKIP', 'Take profit exits', s);
     push('SKIP', 'Trailing stop exits', s);
     push('SKIP', 'Manual exits', s);
+    push(
+      'SKIP',
+      'No mean_reversion_sell (post-deploy)',
+      s,
+    );
     push('SKIP', 'Realized P&L', s);
     push('SKIP', 'Loss cooldown', s);
     push('SKIP', 'Manual API trades', s);
@@ -418,6 +457,11 @@ async function run(): Promise<void> {
     push('SKIP', 'Take profit exits', s);
     push('SKIP', 'Trailing stop exits', s);
     push('SKIP', 'Manual exits', s);
+    push(
+      'SKIP',
+      'No mean_reversion_sell (post-deploy)',
+      s,
+    );
     push('SKIP', 'Realized P&L', s);
     push('SKIP', 'Loss cooldown', s);
     push('SKIP', 'Manual API trades', s);

@@ -45,6 +45,9 @@ export class TradingAgent {
   private dailyStartingValueQuote = 0;
   private dailyRealizedPnL = 0;
   private lastTradeResult: TradeOutcome = null;
+  /** Last `[POSITION-HOLD]` log time per open position id (rate limit). */
+  private positionHoldLastLogMs = new Map<string, number>();
+  private static readonly POSITION_HOLD_LOG_MS = 120_000;
 
   constructor(cfg: AppConfig) {
     this.cfg = cfg;
@@ -647,6 +650,26 @@ export class TradingAgent {
     return merged;
   }
 
+  private logPositionHoldIfDue(currentPrice: number): void {
+    const open = this.positionManager.getOpenPositions();
+    const openIds = new Set(open.map((p) => p.id));
+    for (const id of this.positionHoldLastLogMs.keys()) {
+      if (!openIds.has(id)) this.positionHoldLastLogMs.delete(id);
+    }
+    const now = Date.now();
+    for (const p of open) {
+      if (p.mint !== SOL) continue;
+      const last = this.positionHoldLastLogMs.get(p.id) ?? 0;
+      if (now - last < TradingAgent.POSITION_HOLD_LOG_MS) continue;
+      this.positionHoldLastLogMs.set(p.id, now);
+      const solHuman = Number(p.amount) / 1e9;
+      const unrealized = (currentPrice - p.entryPrice) * solHuman;
+      console.log(
+        `[POSITION-HOLD] ${p.id} currentPrice=${currentPrice} entry=${p.entryPrice} unrealizedPnl=${unrealized.toFixed(4)} slPrice=${p.stopLossPrice ?? 'null'} tpPrice=${p.takeProfitPrice ?? 'null'}`,
+      );
+    }
+  }
+
   private async evaluate(): Promise<void> {
     if (!this.running) return;
     const n = this.priceMonitor.getSampleCount();
@@ -667,6 +690,11 @@ export class TradingAgent {
       if (riskHandled) return;
     }
 
+    if (this.positionManager.getOpenPositions().length > 0) {
+      this.logPositionHoldIfDue(price);
+      return;
+    }
+
     const now = Date.now();
     if (now < this.cooldownUntil) {
       const sec = Math.ceil((this.cooldownUntil - now) / 1000);
@@ -677,149 +705,85 @@ export class TradingAgent {
     const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
     const volPct = vol * 100;
     const t = this.thresholdPct;
-    let signal: 'buy' | 'sell' | 'none' = 'none';
-    if (price < sma * (1 - t / 100) && vol < 0.05) signal = 'buy';
-    if (price > sma * (1 + t / 100) && vol < 0.05) signal = 'sell';
+    let entrySignal: 'buy' | 'none' = 'none';
+    if (price < sma * (1 - t / 100) && vol < 0.05) entrySignal = 'buy';
     console.log(
-      `[AGENT] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% signal=${signal}`,
+      `[AGENT] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% entrySignal=${entrySignal}`,
     );
-    if (signal !== 'none') {
-      await this.executeSignalTrade(signal, price);
+    if (entrySignal === 'buy') {
+      await this.executeMeanReversionBuy(price);
     }
   }
 
-  private async executeSignalTrade(
-    direction: 'buy' | 'sell',
-    priceSolUsdc: number,
-  ): Promise<void> {
+  /** Mean-reversion entry only; exits are SL/TP/trailing via checkExits. */
+  private async executeMeanReversionBuy(priceSolUsdc: number): Promise<void> {
     const strategy = 'mean_reversion_v1';
     try {
-      if (direction === 'buy') {
-        const openCount = this.positionManager.getOpenPositions().length;
-        const gate = this.riskManager.canOpenPosition(
-          openCount,
-          this.dailyRealizedPnL,
-          this.dailyStartingValueQuote,
-        );
-        if (!gate.allowed) {
-          console.log(`[AGENT] Entry blocked: ${gate.reason ?? 'risk'}`);
-          return;
-        }
-        const entryPrice = priceSolUsdc;
-        const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
-        const nav = await this.portfolioValueQuote();
-        const { usdcMicroSpend } = this.riskManager.calculatePositionSize(
-          nav,
+      const openCount = this.positionManager.getOpenPositions().length;
+      const gate = this.riskManager.canOpenPosition(
+        openCount,
+        this.dailyRealizedPnL,
+        this.dailyStartingValueQuote,
+      );
+      if (!gate.allowed) {
+        console.log(`[AGENT] Entry blocked: ${gate.reason ?? 'risk'}`);
+        return;
+      }
+      const entryPrice = priceSolUsdc;
+      const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
+      const nav = await this.portfolioValueQuote();
+      const { usdcMicroSpend } = this.riskManager.calculatePositionSize(
+        nav,
+        entryPrice,
+        stopLossPrice,
+      );
+      const maxUsdcRaw =
+        this.mode === 'paper'
+          ? this.paperEngine.getBalance(USDC).raw
+          : this.liveVirtualUsdc;
+      let usdcSpend = Number(
+        usdcMicroSpend > 0n ? usdcMicroSpend : BigInt(0),
+      );
+      const fallback = Math.floor(
+        (this.tradeAmountLamports / 1e9) * priceSolUsdc * 1e6,
+      );
+      if (usdcSpend < 10_000) {
+        usdcSpend = Math.min(Number(maxUsdcRaw), fallback);
+      }
+      usdcSpend = Math.min(usdcSpend, Number(maxUsdcRaw));
+      if (usdcSpend < 10_000) {
+        console.log('[AGENT] Buy skipped: USDC spend too small');
+        return;
+      }
+      const amountUsdc = BigInt(usdcSpend);
+      const rec = await this.executeSwapLeg(
+        USDC,
+        SOL,
+        amountUsdc,
+        priceSolUsdc,
+        strategy,
+      );
+      if (rec.status === 'paper_filled' || rec.status === 'success') {
+        const solOut = BigInt(rec.outputAmount);
+        this.positionManager.openPosition(
+          SOL,
+          solOut,
           entryPrice,
-          stopLossPrice,
-        );
-        const maxUsdcRaw =
-          this.mode === 'paper'
-            ? this.paperEngine.getBalance(USDC).raw
-            : this.liveVirtualUsdc;
-        let usdcSpend = Number(
-          usdcMicroSpend > 0n ? usdcMicroSpend : BigInt(0),
-        );
-        const fallback = Math.floor(
-          (this.tradeAmountLamports / 1e9) * priceSolUsdc * 1e6,
-        );
-        if (usdcSpend < 10_000) {
-          usdcSpend = Math.min(Number(maxUsdcRaw), fallback);
-        }
-        usdcSpend = Math.min(usdcSpend, Number(maxUsdcRaw));
-        if (usdcSpend < 10_000) {
-          console.log('[AGENT] Buy skipped: USDC spend too small');
-          return;
-        }
-        const amountUsdc = BigInt(usdcSpend);
-        const rec = await this.executeSwapLeg(
-          USDC,
-          SOL,
-          amountUsdc,
-          priceSolUsdc,
+          this.mode,
           strategy,
+          this.riskManager.stopLossPercent,
+          this.riskManager.takeProfitPercent,
+          this.riskManager.trailingStopPercent,
         );
-        if (rec.status === 'paper_filled' || rec.status === 'success') {
-          const solOut = BigInt(rec.outputAmount);
-          this.positionManager.openPosition(
-            SOL,
-            solOut,
-            entryPrice,
-            this.mode,
-            strategy,
-            this.riskManager.stopLossPercent,
-            this.riskManager.takeProfitPercent,
-            this.riskManager.trailingStopPercent,
-          );
-          this.armCooldown(null);
-        }
-      } else {
-        const solPos = this.positionManager
-          .getOpenPositions()
-          .find((p) => p.mint === SOL);
-        const solBal =
-          this.mode === 'paper'
-            ? this.paperEngine.getBalance(SOL).raw
-            : this.liveVirtualSol;
-        const amountSol = solPos
-          ? solPos.amount
-          : BigInt(
-              Math.min(Number(this.tradeAmountLamports), Number(solBal)),
-            );
-        if (amountSol <= 0n) {
-          console.log('[AGENT] Sell skipped: no SOL');
-          return;
-        }
-        const rec = await this.executeSwapLeg(
-          SOL,
-          USDC,
-          amountSol,
-          priceSolUsdc,
-          strategy,
-          solPos ? { skipLog: true } : undefined,
-        );
-        if (rec.status === 'paper_filled' || rec.status === 'success') {
-          if (solPos) {
-            const closed = this.positionManager.closePosition(
-              solPos.id,
-              priceSolUsdc,
-              'mean_reversion_sell',
-            );
-            this.dailyRealizedPnL += closed.realizedPnlQuote;
-            this.lastTradeResult =
-              closed.realizedPnlQuote >= 0 ? 'win' : 'loss';
-            logTrade({
-              timestamp: rec.timestamp,
-              inputMint: rec.inputMint,
-              outputMint: rec.outputMint,
-              inputAmount: rec.inputAmount,
-              outputAmount: rec.outputAmount,
-              expectedOutput: rec.expectedOutput,
-              txSignature: rec.txSignature,
-              status: rec.status,
-              priceImpact: rec.priceImpact,
-              mode: rec.mode,
-              strategy: rec.strategy,
-              slippageBps: rec.slippageBps,
-              priceAtTrade: priceSolUsdc,
-              entryPrice: solPos.entryPrice,
-              exitPrice: priceSolUsdc,
-              exitReason: 'mean_reversion_sell',
-              realizedPnl: closed.realizedPnlQuote,
-            });
-            this.armCooldown(this.lastTradeResult);
-          } else {
-            this.armCooldown(null);
-          }
-        }
+        this.armCooldown(null);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error('[AGENT] executeSignalTrade failed:', msg);
+      console.error('[AGENT] executeMeanReversionBuy failed:', msg);
       const failed: TradeRecord = {
         timestamp: new Date().toISOString(),
-        inputMint: direction === 'buy' ? USDC : SOL,
-        outputMint: direction === 'buy' ? SOL : USDC,
+        inputMint: USDC,
+        outputMint: SOL,
         inputAmount: '0',
         outputAmount: '0',
         txSignature: 'n/a',
