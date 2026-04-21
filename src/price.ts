@@ -67,8 +67,8 @@ export class PriceMonitor {
       const price = calculatePrice(q, dIn, dOut);
       const t = Date.now();
       this.history.push({ t, price });
-      if (this.history.length > 100) {
-        this.history.splice(0, this.history.length - 100);
+      if (this.history.length > 300) {
+        this.history.splice(0, this.history.length - 300);
       }
       const sma20 = this.getMovingAverage(20) ?? price;
       const change = sma20 !== 0 ? ((price - sma20) / sma20) * 100 : 0;

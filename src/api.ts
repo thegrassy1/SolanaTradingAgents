@@ -113,7 +113,7 @@ async function handleRequest(
     if (method === 'GET' && pathname === '/prices/recent') {
       const limitRaw = url.searchParams.get('limit') ?? '50';
       const limit = Math.min(
-        100,
+        300,
         Math.max(1, Number.parseInt(limitRaw, 10) || 50),
       );
       const points = agent.priceMonitor.getPriceHistory(limit);

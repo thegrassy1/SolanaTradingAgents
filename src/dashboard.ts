@@ -344,29 +344,38 @@ function normTrade(t){return{timestamp:t.timestamp,inputMint:t.input_mint||t.inp
 function fmtTime(iso){try{var d=new Date(iso);return d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(x){return'\u2014'}}
 async function postJson(url,body){var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json()}
 
-function renderChart(points,sma){
+function rollingAvg(prices,n){
+  return prices.map(function(_,i){
+    if(i<n-1)return null;
+    var s=0;for(var j=i-n+1;j<=i;j++)s+=prices[j];
+    return s/n;
+  });
+}
+function renderChart(points){
   var canvas=document.getElementById('priceChart');
   if(!canvas||typeof Chart==='undefined')return;
-  var labels=points.map(function(p,i){return i});
-  var data=points.map(function(p){return p.price});
-  var smaLine=points.map(function(){return sma});
+  var prices=points.map(function(p){return p.price});
+  var smaData=rollingAvg(prices,20);
+  var labels=points.map(function(p){
+    var d=new Date(p.t);
+    return d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+  });
   var ctx=canvas.getContext('2d');
   var grad=ctx.createLinearGradient(0,0,0,canvas.clientHeight);
   grad.addColorStop(0,'rgba(59,130,246,0.35)');
   grad.addColorStop(1,'rgba(59,130,246,0)');
   if(priceChart){
     priceChart.data.labels=labels;
-    priceChart.data.datasets[0].data=data;
+    priceChart.data.datasets[0].data=prices;
     priceChart.data.datasets[0].backgroundColor=grad;
-    if(sma!=null){priceChart.data.datasets[1].data=smaLine;priceChart.data.datasets[1].hidden=false}
-    else{priceChart.data.datasets[1].hidden=true}
+    priceChart.data.datasets[1].data=smaData;
     priceChart.update('none');return;
   }
   priceChart=new Chart(ctx,{
     type:'line',
     data:{labels:labels,datasets:[
-      {label:'SOL/USDC',data:data,borderColor:'#3b82f6',backgroundColor:grad,fill:true,tension:0.3,pointRadius:0,borderWidth:2.2},
-      {label:'SMA 20',data:smaLine,borderColor:'rgba(168,85,247,0.55)',borderDash:[4,4],borderWidth:1.5,pointRadius:0,fill:false,hidden:sma==null}
+      {label:'SOL/USDC',data:prices,borderColor:'#3b82f6',backgroundColor:grad,fill:true,tension:0.3,pointRadius:0,borderWidth:2.2},
+      {label:'SMA 20',data:smaData,borderColor:'rgba(168,85,247,0.8)',borderDash:[5,3],borderWidth:1.5,pointRadius:0,fill:false,spanGaps:false}
     ]},
     options:{
       responsive:true,maintainAspectRatio:false,
@@ -376,11 +385,14 @@ function renderChart(points,sma){
         tooltip:{
           backgroundColor:'#141a23',borderColor:'#2d3a4b',borderWidth:1,
           titleColor:'#e6edf3',bodyColor:'#a8b3c1',padding:10,
-          callbacks:{title:function(){return ''},label:function(c){return c.dataset.label+': $'+Number(c.parsed.y).toFixed(2)}}
+          callbacks:{
+            title:function(items){return items[0]?items[0].label:''},
+            label:function(c){return c.dataset.label+': $'+Number(c.parsed.y).toFixed(2)}
+          }
         }
       },
       scales:{
-        x:{display:false},
+        x:{display:true,ticks:{color:'#6e7a8a',maxTicksLimit:8,maxRotation:0,font:{size:10}},grid:{color:'rgba(45,58,75,0.3)'}},
         y:{ticks:{color:'#6e7a8a',maxTicksLimit:5,font:{size:11},callback:function(v){return '$'+Number(v).toFixed(2)}},grid:{color:'rgba(45,58,75,0.4)'}}
       }
     }
@@ -388,7 +400,7 @@ function renderChart(points,sma){
 }
 
 async function refresh(){
-  var st=await jget('/status'),pos=await jget('/positions'),risk=await jget('/risk'),hist=await jget('/history?limit=12'),series=await jget('/prices/recent?limit=60');
+  var st=await jget('/status'),pos=await jget('/positions'),risk=await jget('/risk'),hist=await jget('/history?limit=12'),series=await jget('/prices/recent?limit=200');
   document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
 
   if(st){
@@ -442,7 +454,7 @@ async function refresh(){
   }
 
   if(series&&series.points&&series.points.length){
-    renderChart(series.points,(st&&st.sma)||null);
+    renderChart(series.points);
   } else if(priceChart){
     priceChart.data.labels=[];priceChart.data.datasets[0].data=[];priceChart.data.datasets[1].data=[];priceChart.update();
   }
@@ -638,7 +650,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 </div>
 
 <section class="card" style="margin-bottom:16px">
-  <h2>Price chart <span class="count">last 60</span></h2>
+  <h2>Price chart <span class="count">last ~100 min</span></h2>
   <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
 </section>
 
