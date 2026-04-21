@@ -186,6 +186,156 @@ npm run verify
 
 Connects to the running agent at `http://127.0.0.1:3456` and reads `data/trades.db`. Checks all risk features end to end (stop loss, take profit, trailing stop, circuit breaker, cooldown). See `scripts/verify-features.ts`.
 
+## Data Available for Analysis
+
+### SQLite: `data/trades.db`
+
+Two tables. Connect with: `sqlite3 ~/apps/solana-trader/data/trades.db`
+
+**`trades`** — one row per swap execution (both entries and exits):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `timestamp` | TEXT | ISO-8601, UTC, default `datetime('now')` |
+| `mode` | TEXT | `paper` or `live` |
+| `input_mint` | TEXT | Token mint address being sold |
+| `output_mint` | TEXT | Token mint address being bought |
+| `input_amount` | TEXT | Raw amount of input token (bigint as string) |
+| `output_amount` | TEXT | Raw amount of output token received |
+| `expected_output` | TEXT | Quote's expected output before execution |
+| `price_impact` | TEXT | Jupiter price impact (string) |
+| `slippage_bps` | INTEGER | Slippage in basis points |
+| `tx_signature` | TEXT | On-chain signature (null for paper) |
+| `status` | TEXT | `paper_filled`, `success`, or `failed` |
+| `error_message` | TEXT | Populated on failure |
+| `strategy` | TEXT | `mean_reversion_v1` or `manual` |
+| `price_at_trade` | REAL | SOL/USDC spot price at execution |
+| `entry_price` | REAL | Entry price of position (populated on close rows) |
+| `exit_price` | REAL | Exit price of position (populated on close rows) |
+| `exit_reason` | TEXT | `stop_loss`, `take_profit`, `trailing_stop`, `manual`, `manual_api` — NULL on entry rows |
+| `realized_pnl` | REAL | P&L in USDC; NULL on entry rows |
+
+Entry rows: `exit_reason IS NULL`. Close rows: `exit_reason IS NOT NULL`.
+
+**`price_snapshots`** — one row per poll tick (every 30s):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | Auto-increment |
+| `timestamp` | TEXT | ISO-8601, UTC |
+| `input_mint` | TEXT | Base token (SOL) |
+| `output_mint` | TEXT | Quote token (USDC) |
+| `price` | REAL | SOL/USDC price |
+| `sma_20` | REAL | 20-sample moving average |
+| `volatility` | REAL | Rolling volatility (decimal, e.g. 0.0003) |
+
+16,000+ rows from 2026-04-15 onward. Good for backtesting signal quality.
+
+---
+
+### JSON State Files: `data/`
+
+**`paper-portfolio.json`** — paper engine live state:
+- `balances`: raw bigint balances per mint
+- `tradeHistory`: array of all paper swaps
+- `startTime`: when the portfolio was last reset
+- `initialBalancesSmallest`: balances at reset
+- `initialQuoteValue`: USDC NAV at reset (used as P&L baseline)
+
+**`positions.json`** — currently open positions (array, usually 0–1 entries):
+- `id`, `mint`, `entryPrice`, `entryTime`, `amount` (bigint)
+- `stopLossPrice`, `takeProfitPrice`, `trailingStopPercent`, `highWaterMark`
+- `strategy`, `mode`
+
+**`closed-positions.json`** — all historical closed positions (grows unbounded):
+- Same fields as open positions plus `exitPrice`, `exitTime`, `exitReason`, `realizedPnlQuote`
+- The only source of `entryTime`+`exitTime` together — use this for hold-time analysis
+
+**`runtime-config.json`** — persisted runtime overrides applied via `POST /config`:
+- Keys match POST /config key names (`stop_loss`, `take_profit`, `threshold`, etc.)
+- Loaded at startup; survives `pm2 restart`
+
+---
+
+### PM2 Logs: `~/.pm2/logs/`
+
+- **`solana-trader-out.log`** — structured operational log:
+  - `[PRICE]` — every tick: timestamp, price, sma20, devFromSma%, vol%
+  - `[AGENT]` — every tick (when warmed up): price, sma, dev%, vol%, entrySignal
+  - `[AGENT] Cooling down (entries), Xs remaining` — post-trade cooldown
+  - `[AGENT] Entry blocked: <reason>` — risk gate rejected an entry
+  - `[PAPER-SWAP]` — paper trade execution details
+  - `[POSITION-OPEN]`, `[POSITION-CLOSE]`, `[POSITION-HOLD]` — position lifecycle
+  - `[API]` — HTTP request log (method, path, status, duration)
+  - `[SCHEDULER]` — daily report trigger
+
+- **`solana-trader-error.log`** — exceptions and unhandled rejections only; should be 0 bytes in healthy operation
+
+---
+
+### Common Analysis Queries
+
+```bash
+# Exit reason distribution with P&L
+sqlite3 ~/apps/solana-trader/data/trades.db "
+SELECT exit_reason,
+       COUNT(*) AS trades,
+       ROUND(AVG(realized_pnl), 4) AS avg_pnl,
+       ROUND(SUM(realized_pnl), 4) AS total_pnl
+FROM trades
+WHERE exit_reason IS NOT NULL AND exit_reason != ''
+GROUP BY exit_reason ORDER BY trades DESC;"
+
+# Daily realized P&L
+sqlite3 ~/apps/solana-trader/data/trades.db "
+SELECT date(timestamp) AS day,
+       COUNT(*) AS closes,
+       ROUND(SUM(realized_pnl), 4) AS daily_pnl
+FROM trades
+WHERE exit_reason IS NOT NULL AND exit_reason != ''
+GROUP BY date(timestamp) ORDER BY day;"
+
+# Win rate (closes with non-zero P&L)
+sqlite3 ~/apps/solana-trader/data/trades.db "
+SELECT COUNT(*) AS total,
+       SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+       SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+       ROUND(100.0 * SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) AS win_pct
+FROM trades
+WHERE exit_reason IS NOT NULL AND exit_reason != ''
+  AND realized_pnl IS NOT NULL AND realized_pnl != 0;"
+
+# Hold time by exit reason (uses closed-positions.json — run in Python)
+# python3 -c "
+# import json
+# from datetime import datetime
+# data = json.load(open('data/closed-positions.json'))
+# from collections import defaultdict
+# by_reason = defaultdict(list)
+# for p in data:
+#     et = datetime.fromisoformat(p['entryTime'].replace('Z','+00:00'))
+#     xt = datetime.fromisoformat(p['exitTime'].replace('Z','+00:00'))
+#     by_reason[p['exitReason']].append((xt-et).total_seconds()/60)
+# for r, times in sorted(by_reason.items()):
+#     print(f'{r}: avg={sum(times)/len(times):.1f}min n={len(times)}')
+# "
+
+# Position size history
+sqlite3 ~/apps/solana-trader/data/trades.db "
+SELECT date(timestamp) AS day,
+       ROUND(CAST(input_amount AS REAL)/1e6, 2) AS usdc_spent,
+       price_at_trade
+FROM trades
+WHERE input_mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+  AND (exit_reason IS NULL OR exit_reason = '')
+ORDER BY id DESC LIMIT 20;"
+
+# Check for rogue mean_reversion_sell exits (should always return 0)
+sqlite3 ~/apps/solana-trader/data/trades.db "
+SELECT COUNT(*) AS bad_exits FROM trades WHERE exit_reason = 'mean_reversion_sell';"
+```
+
 ## How I Want You To Work
 
 - **Before changing anything**, query the running system (`GET /status`, `GET /risk`, `GET /positions`) or read the database to confirm the hypothesis
