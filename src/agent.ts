@@ -1,5 +1,6 @@
 import { config, type AppConfig } from './config';
 import {
+  db,
   getRecentTrades,
   getTradeSummary,
   logPrice,
@@ -13,7 +14,9 @@ import { swap } from './swap';
 import type { TradeRecord } from './types';
 import { getTokenDecimals } from './tokenInfo';
 import {
+  loadDailyState,
   loadRuntimeConfigFile,
+  saveDailyState,
   saveRuntimeConfigFile,
   snapshotToPersistable,
 } from './runtimeConfigPersist';
@@ -86,6 +89,44 @@ export class TradingAgent {
     }
   }
 
+  /**
+   * Restores daily tracking state after a restart so the circuit breaker
+   * and "Today" report section stay accurate across pm2 restarts.
+   *
+   * - dailyStartingValueQuote: loaded from data/daily-state.json (written each
+   *   time ensureDailyNav sets the baseline). Ignored if the saved date is not
+   *   today's UTC date.
+   * - dailyRealizedPnL: recomputed from the trades table (source of truth).
+   */
+  private restoreDailyState(): void {
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Restore day-start NAV from disk
+    const saved = loadDailyState();
+    if (saved && saved.date === today && saved.startingValueQuote > 0) {
+      this.dailyStartingValueQuote = saved.startingValueQuote;
+      console.log(
+        `[AGENT] Restored daily start value: $${saved.startingValueQuote.toFixed(2)}`,
+      );
+    }
+
+    // Restore today's realized P&L from DB
+    const row = db
+      .prepare(
+        `SELECT COALESCE(SUM(realized_pnl), 0) AS total
+         FROM trades
+         WHERE mode = ? AND date(timestamp) = ? AND realized_pnl IS NOT NULL`,
+      )
+      .get(this.mode, today) as { total: number };
+    const restoredPnl = row?.total ?? 0;
+    if (restoredPnl !== 0) {
+      this.dailyRealizedPnL = restoredPnl;
+      console.log(
+        `[AGENT] Restored daily realized P&L from DB: $${restoredPnl.toFixed(2)}`,
+      );
+    }
+  }
+
   /** Apply one /config key; returns true if a known key was applied. */
   private applyRuntimeConfigValue(key: string, value: string): boolean {
     const k = key.toLowerCase().replace(/-/g, '_');
@@ -120,6 +161,7 @@ export class TradingAgent {
         `[AGENT] Paper balances (human): SOL=${this.cfg.paperInitialSol} USDC=${this.cfg.paperInitialUsdc}`,
       );
     }
+    this.restoreDailyState();
     void this.paperEngine.ensureInitialQuoteCaptured();
     this.priceMonitor.onPriceUpdate = (price, sma20) => {
       const vol = this.priceMonitor.getVolatility(20);
@@ -184,11 +226,13 @@ export class TradingAgent {
       this.dailyDateKeyUtc = key;
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
       this.dailyRealizedPnL = 0;
+      saveDailyState({ date: key, startingValueQuote: this.dailyStartingValueQuote });
       console.log(
         `[AGENT] UTC day ${key}: daily NAV baseline=${this.dailyStartingValueQuote.toFixed(2)}`,
       );
     } else if (this.dailyStartingValueQuote <= 0) {
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
+      saveDailyState({ date: key, startingValueQuote: this.dailyStartingValueQuote });
     }
   }
 

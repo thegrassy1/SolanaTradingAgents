@@ -241,9 +241,14 @@ export async function buildDailyReport(
     `Avg Win: ${fmtUsdSigned(tradeSummary.avgWin)}  |  Avg Loss: ${fmtUsdSigned(tradeSummary.avgLoss)}`,
   );
   lines.push(`Expectancy: ${fmtUsdSigned(tradeSummary.expectancy)}/trade`);
-  lines.push(
-    `Exit Reasons: stop_loss=${exitReasons.stop_loss}, take_profit=${exitReasons.take_profit}, trailing_stop=${exitReasons.trailing_stop}, manual=${exitReasons.manual}`,
-  );
+  const exitLine = [
+    `stop_loss=${exitReasons.stop_loss}`,
+    `take_profit=${exitReasons.take_profit}`,
+    `trailing_stop=${exitReasons.trailing_stop}`,
+    `manual=${exitReasons.manual}`,
+    ...(exitReasons.other > 0 ? [`legacy=${exitReasons.other}`] : []),
+  ].join(', ');
+  lines.push(`Exit Reasons: ${exitLine}`);
   lines.push('');
   lines.push('<b>Open Positions</b>');
   lines.push(`Count: ${String(positions.length)}`);

@@ -293,7 +293,8 @@ export type ClosedExitStats = {
     stop_loss: number;
     take_profit: number;
     trailing_stop: number;
-    manual: number;
+    manual: number;  // 'manual' or 'manual_api'
+    other: number;   // legacy / unrecognised (e.g. historical 'mean_reversion_sell')
   };
 };
 
@@ -321,6 +322,7 @@ export function getClosedExitStats(
     take_profit: 0,
     trailing_stop: 0,
     manual: 0,
+    other: 0,
   };
   let wins = 0;
   let losses = 0;
@@ -333,7 +335,8 @@ export function getClosedExitStats(
     if (reason === 'stop_loss') exitReasons.stop_loss += 1;
     else if (reason === 'take_profit') exitReasons.take_profit += 1;
     else if (reason === 'trailing_stop') exitReasons.trailing_stop += 1;
-    else exitReasons.manual += 1;
+    else if (reason === 'manual' || reason === 'manual_api') exitReasons.manual += 1;
+    else exitReasons.other += 1;
 
     const pnl = r.realized_pnl;
     if (pnl > 0) {
