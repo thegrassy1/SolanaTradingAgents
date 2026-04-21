@@ -221,6 +221,7 @@ export type TradeSummary = {
   avgWin: number | null;
   avgLoss: number | null;
   expectancy: number | null;
+  totalRealizedPnl: number;
   successfulTrades: number;
   failedTrades: number;
   totalVolumeIn: string;
@@ -237,6 +238,7 @@ export function getTradeSummary(mode?: 'paper' | 'live'): TradeSummary {
     breakevens: number;
     avg_win: number | null;
     avg_loss: number | null;
+    total_pnl: number | null;
     failed: number;
     vol_in: number | null;
     vol_out: number | null;
@@ -252,6 +254,7 @@ export function getTradeSummary(mode?: 'paper' | 'live'): TradeSummary {
       SUM(CASE WHEN exit_price IS NOT NULL AND realized_pnl = 0 THEN 1 ELSE 0 END) AS breakevens,
       AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END) AS avg_win,
       AVG(CASE WHEN realized_pnl < 0 THEN realized_pnl END) AS avg_loss,
+      COALESCE(SUM(realized_pnl), 0) AS total_pnl,
       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
       SUM(CAST(input_amount AS REAL)) AS vol_in,
       SUM(CAST(output_amount AS REAL)) AS vol_out
@@ -289,6 +292,7 @@ export function getTradeSummary(mode?: 'paper' | 'live'): TradeSummary {
     avgWin,
     avgLoss,
     expectancy,
+    totalRealizedPnl: row.total_pnl ?? 0,
     successfulTrades: total - failed,
     failedTrades: failed,
     totalVolumeIn: String(Math.round(row.vol_in ?? 0)),

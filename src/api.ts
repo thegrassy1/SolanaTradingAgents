@@ -3,7 +3,7 @@ import { URL } from 'url';
 import type { TradingAgent } from './agent';
 import { config } from './config';
 import { getDashboardHtml } from './dashboard';
-import { db, getRecentTrades } from './db';
+import { db, getRecentTrades, getTradeSummary } from './db';
 import { buildDailyReport } from './report';
 import { sendTelegramMessage } from './telegram';
 import { getQuote } from './price';
@@ -107,6 +107,13 @@ async function handleRequest(
         ].join('; '),
       });
       res.end(body);
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/stats') {
+      const modeParam = url.searchParams.get('mode') as 'paper' | 'live' | undefined;
+      const summary = getTradeSummary(modeParam ?? (agent.mode as 'paper' | 'live'));
+      done(200, summary);
       return;
     }
 

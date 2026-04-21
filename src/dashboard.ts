@@ -100,15 +100,14 @@ body{
 
 /* Layout */
 .grid{display:grid;gap:16px}
-.hero{grid-template-columns:repeat(3,minmax(0,1fr))}
+.two{grid-template-columns:1fr 1fr}
 .split{grid-template-columns:1fr 1fr}
 .wide{grid-template-columns:2fr 1fr}
 @media(max-width:1100px){
   .wide{grid-template-columns:1fr}
-  .hero{grid-template-columns:1fr 1fr}
 }
 @media(max-width:760px){
-  .hero,.split{grid-template-columns:1fr}
+  .two,.split{grid-template-columns:1fr}
   body{padding:12px;padding-bottom:120px}
 }
 
@@ -131,6 +130,12 @@ body{
   content:"";position:absolute;inset:0 0 auto 0;height:2px;
   background:linear-gradient(90deg,#f59e0b,#ef4444);opacity:.7;
 }
+.card.accent-perf::before{
+  content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:linear-gradient(90deg,#22c55e,#06b6d4);opacity:.7;
+}
+.wallet-total{font-size:11px;color:var(--muted);margin-top:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.wallet-note{font-size:11px;color:var(--muted);margin-top:6px;font-style:italic}
 .card h2{
   margin:0 0 14px;font-size:11px;font-weight:700;letter-spacing:.12em;
   color:var(--muted);text-transform:uppercase;
@@ -428,7 +433,7 @@ function renderChart(points){
 }
 
 async function refresh(){
-  var st=await jget('/status'),pos=await jget('/positions'),risk=await jget('/risk'),hist=await jget('/history?limit=12'),series=await jget('/prices/recent?limit=200');
+  var st=await jget('/status'),pos=await jget('/positions'),risk=await jget('/risk'),hist=await jget('/history?limit=12'),series=await jget('/prices/recent?limit=200'),stats=await jget('/stats');
   document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
 
   if(st){
@@ -454,31 +459,41 @@ async function refresh(){
       '<div class="kpi"><div class="k">Volatility</div><div class="v">'+(vol!=null?fmtPct(vol*100):'\u2014')+'</div></div>'
     );
 
-    var pnl=st.paperPortfolio&&st.paperPortfolio.pnl;
-    if(pnl){
-      setText('portVal',fmtUsd(pnl.currentValue));
-      var pEl=document.getElementById('portPnl');
-      pEl.textContent=arrow(pnl.pnl)+' '+sign(pnl.pnl)+fmtUsd(pnl.pnl)+' ('+sign(pnl.pnlPercent)+fmtPct(pnl.pnlPercent)+')';
-      pEl.className='trend '+clsPnL(pnl.pnl);
-      setHtml('kpiPort',
-        '<div class="kpi"><div class="k">Initial</div><div class="v">'+fmtUsd(pnl.initialValue)+'</div></div>'+
-        '<div class="kpi"><div class="k">P&amp;L</div><div class="v '+clsPnL(pnl.pnl)+'">'+sign(pnl.pnl)+fmtUsd(pnl.pnl)+'</div></div>'+
-        '<div class="kpi"><div class="k">Return</div><div class="v '+clsPnL(pnl.pnlPercent)+'">'+sign(pnl.pnlPercent)+fmtPct(pnl.pnlPercent)+'</div></div>'
-      );
-    } else {
-      setText('portVal','\u2014');setHtml('portPnl','<span class="trend neu">\u2014</span>');setHtml('kpiPort','');
-    }
-
+    /* --- Wallet card: balances only, no P&L --- */
     var balHtml='';
+    var walletTotal=0;
     if(st.paperPortfolio&&st.paperPortfolio.balances){
       var px=lp||0;
       for(var mint in st.paperPortfolio.balances){
         var h=st.paperPortfolio.balances[mint].human;
         var usd=mint===SOL?h*px:(mint===USDC?h:0);
+        walletTotal+=usd;
         balHtml+='<div class="bal"><div class="sym">'+tokenLabel(mint)+'</div><div class="amt">'+(mint===SOL?fmtSol(h)+' SOL':'$'+fmtNum(h,2))+'</div><div class="usd">\u2248 '+fmtUsd(usd)+'</div></div>';
       }
     }
+    setText('walletTotal',fmtUsd(walletTotal));
     setHtml('balances',balHtml||'<div class="empty">No balances</div>');
+  }
+
+  /* --- Trading Performance card --- */
+  if(stats){
+    var tPnl=stats.totalRealizedPnl||0;
+    var winRate=stats.winRate||0;
+    var decided=stats.wins+stats.losses;
+    var dailyNet=risk?(risk.dailyRealizedPnLNet!=null?risk.dailyRealizedPnLNet:risk.dailyRealizedPnL||0):0;
+    setText('perfPnl',fmtUsd(tPnl));
+    document.getElementById('perfPnl').className='val-xl '+(tPnl>=0?'pos':'neg');
+    setText('perfPnlSign',(tPnl>=0?'+':'')+fmtUsd(tPnl));
+    setHtml('kpiPerf',
+      '<div class="kpi"><div class="k">Win rate</div><div class="v '+(decided>=5?clsPnL(winRate-50):'neu')+'">'+(decided>=5?fmtPct(winRate):'\u2014 <span style="font-size:10px;color:var(--muted)">need 5+</span>')+'</div></div>'+
+      '<div class="kpi"><div class="k">Avg win</div><div class="v pos">'+(stats.avgWin!=null?'+'+fmtUsd(stats.avgWin):'\u2014')+'</div></div>'+
+      '<div class="kpi"><div class="k">Avg loss</div><div class="v neg">'+(stats.avgLoss!=null?fmtUsd(stats.avgLoss):'\u2014')+'</div></div>'
+    );
+    setHtml('kpiPerf2',
+      '<div class="kpi"><div class="k">Today (realized)</div><div class="v '+clsPnL(dailyNet)+'">'+sign(dailyNet)+fmtUsd(dailyNet)+'</div></div>'+
+      '<div class="kpi"><div class="k">Closed trades</div><div class="v">'+stats.closedTrades+'</div></div>'+
+      '<div class="kpi"><div class="k">Expectancy</div><div class="v '+(stats.expectancy!=null?clsPnL(stats.expectancy):'neu')+'">'+(stats.expectancy!=null?sign(stats.expectancy)+fmtUsd(stats.expectancy)+'/trade':'\u2014')+'</div></div>'
+    );
   }
 
   if(series&&series.points&&series.points.length){
@@ -662,7 +677,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
   </select>
 </header>
 
-<div class="grid hero" style="margin-bottom:16px">
+<div class="grid two" style="margin-bottom:16px">
   <section class="card accent-price">
     <h2>Price <span class="count">SOL / USDC</span></h2>
     <div id="priceMain" class="val-xl">\u2014</div>
@@ -670,11 +685,21 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     <div id="kpiPrice" class="kpis"></div>
   </section>
   <section class="card accent-port">
-    <h2>Portfolio</h2>
-    <div id="portVal" class="val-xl">\u2014</div>
-    <div id="portPnl" class="trend neu">\u2014</div>
-    <div id="kpiPort" class="kpis"></div>
+    <h2>Wallet</h2>
+    <div class="wallet-total">Total value</div>
+    <div id="walletTotal" class="val-xl">\u2014</div>
+    <div class="wallet-note">Holdings marked to current SOL price</div>
     <div id="balances" class="balances"></div>
+  </section>
+</div>
+<div class="grid two" style="margin-bottom:16px">
+  <section class="card accent-perf">
+    <h2>Trading Performance</h2>
+    <div style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px">All-time realized P&amp;L</div>
+    <div id="perfPnl" class="val-xl neu">\u2014</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px;font-style:italic">From closed trades only &mdash; unaffected by SOL price</div>
+    <div id="kpiPerf" class="kpis"></div>
+    <div id="kpiPerf2" class="kpis" style="margin-top:8px"></div>
   </section>
   <section class="card accent-risk">
     <h2>Risk</h2>
