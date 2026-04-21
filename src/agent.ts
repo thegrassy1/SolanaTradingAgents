@@ -716,6 +716,10 @@ export class TradingAgent {
 
   private async evaluate(): Promise<void> {
     if (!this.running) return;
+    // ensureDailyNav runs on every tick (before warmup guard) so the circuit
+    // breaker baseline and daily-state.json are populated immediately on startup,
+    // not delayed by the 10-sample warmup period.
+    await this.ensureDailyNav();
     const n = this.priceMonitor.getSampleCount();
     if (n < 10) {
       console.log(`[AGENT] Warming up, ${n}/10 prices collected`);
@@ -725,8 +729,6 @@ export class TradingAgent {
     const sma = this.priceMonitor.getMovingAverage(20);
     const vol = this.priceMonitor.getVolatility(20);
     if (price === null || sma === null) return;
-
-    await this.ensureDailyNav();
     this.positionManager.updateHighWaterMarks(price);
     const exits = this.positionManager.checkExits(price);
     if (exits.length > 0) {
