@@ -10,6 +10,15 @@ import { getQuote } from './price';
 import type { TradeRecord } from './types';
 import { loadWallet } from './wallet';
 
+/** Parse /strategies[/:name[/:sub]]. Returns null if not a strategies path. */
+function parseStrategyPath(
+  pathname: string,
+): { name: string; sub: string | null } | null {
+  const parts = pathname.split('/').filter(Boolean);
+  if (parts[0] !== 'strategies') return null;
+  return { name: parts[1] ?? '', sub: parts[2] ?? null };
+}
+
 /** Serialize JSON with BigInt support (BigInt → string). */
 function jsonSafe(obj: unknown): string {
   return JSON.stringify(obj, (_, value) =>
@@ -342,6 +351,58 @@ async function handleRequest(
         const msg = e instanceof Error ? e.message : String(e);
         done(500, { error: msg });
       }
+      return;
+    }
+
+    // Strategy routes: /strategies[/:name[/:sub]]
+    const stratPath = parseStrategyPath(pathname);
+    if (stratPath) {
+      // GET /strategies — list all strategies
+      if (method === 'GET' && !stratPath.name) {
+        done(200, { strategies: agent.getStrategiesList() });
+        return;
+      }
+
+      if (stratPath.name && stratPath.sub === 'status' && method === 'GET') {
+        const status = await agent.getStrategyStatus(stratPath.name);
+        if (!status) { done(404, { error: `Strategy not found: ${stratPath.name}` }); return; }
+        done(200, status);
+        return;
+      }
+
+      if (stratPath.name && stratPath.sub === 'trades' && method === 'GET') {
+        const s = agent.getStrategiesList().find((x) => x.name === stratPath.name);
+        if (!s) { done(404, { error: `Strategy not found: ${stratPath.name}` }); return; }
+        const limitRaw = url.searchParams.get('limit') ?? '20';
+        const limit = Math.min(500, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
+        const rows = db
+          .prepare(`SELECT * FROM trades WHERE strategy = ? ORDER BY id DESC LIMIT ?`)
+          .all(stratPath.name, limit);
+        done(200, rows);
+        return;
+      }
+
+      if (stratPath.name && stratPath.sub === 'config') {
+        if (method === 'GET') {
+          const cfg = agent.getStrategyConfig(stratPath.name);
+          if (!cfg) { done(404, { error: `Strategy not found: ${stratPath.name}` }); return; }
+          done(200, { strategy: stratPath.name, config: cfg });
+          return;
+        }
+        if (method === 'POST') {
+          const raw = await readBody(req);
+          const body = parseJson<{ key?: string; value?: string }>(raw);
+          if (!body.key || body.value === undefined) {
+            done(400, { error: 'Missing key or value' }); return;
+          }
+          const ok = agent.setStrategyConfig(stratPath.name, body.key, String(body.value));
+          if (!ok) { done(400, { error: `Unknown strategy or invalid value: ${stratPath.name}.${body.key}` }); return; }
+          done(200, { strategy: stratPath.name, key: body.key, value: body.value, message: 'Strategy config updated' });
+          return;
+        }
+      }
+
+      done(404, { error: 'Not found' });
       return;
     }
 

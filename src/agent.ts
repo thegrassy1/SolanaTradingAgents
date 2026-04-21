@@ -2,6 +2,7 @@ import { config, type AppConfig } from './config';
 import {
   db,
   getRecentTrades,
+  getStrategyStats,
   getTradeSummary,
   logPrice,
   logTrade,
@@ -10,12 +11,14 @@ import { PaperTradingEngine } from './paper';
 import { PositionManager } from './positions';
 import { calculatePrice, getQuote, PriceMonitor } from './price';
 import { RiskManager, type TradeOutcome } from './risk';
+import { registry } from './strategies/registry';
 import { swap } from './swap';
 import type { TradeRecord } from './types';
 import { getTokenDecimals } from './tokenInfo';
 import {
   loadDailyState,
   loadRuntimeConfigFile,
+  loadStrategyConfigsFromFile,
   saveDailyState,
   saveRuntimeConfigFile,
   snapshotToPersistable,
@@ -47,8 +50,12 @@ export class TradingAgent {
   private liveVirtualSol: bigint;
   private liveVirtualUsdc: bigint;
   private startedAt: Date | null = null;
-  private thresholdPct = 2;
   private tradeAmountLamports: number;
+
+  /** Reads threshold from the active strategy config (mean_reversion_v1). */
+  get thresholdPct(): number {
+    return registry.getConfig('mean_reversion_v1').threshold ?? 2;
+  }
   private dailyDateKeyUtc: string;
   private dailyStartingValueQuote = 0;
   /** Sum of gross realized P&L (mark-to-market) for the UTC day. */
@@ -86,6 +93,14 @@ export class TradingAgent {
   }
 
   private loadPersistedRuntimeKeys(): void {
+    // Load strategy-specific configs first (migration runs inside loadStrategyConfigsFromFile)
+    const strategyConfigs = loadStrategyConfigsFromFile();
+    if (strategyConfigs) {
+      registry.loadConfigs(strategyConfigs);
+      console.log('[CONFIG] Loaded strategy configs from disk');
+    }
+
+    // Load flat agent-level overrides (threshold no longer lives here after migration)
     const data = loadRuntimeConfigFile();
     if (!data) return;
     let n = 0;
@@ -143,8 +158,9 @@ export class TradingAgent {
       this.tradeAmountLamports = Number(value);
       return true;
     }
+    // Backwards-compat: POST /config { key: "threshold" } applies to mean_reversion_v1
     if (k === 'threshold') {
-      this.thresholdPct = Number(value);
+      registry.setConfigKey('mean_reversion_v1', 'threshold', Number(value));
       return true;
     }
     return false;
@@ -805,13 +821,24 @@ export class TradingAgent {
 
     const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
     const volPct = vol * 100;
-    const t = this.thresholdPct;
-    let entrySignal: 'buy' | 'none' = 'none';
-    if (price < sma * (1 - t / 100) && vol < 0.05) entrySignal = 'buy';
+
+    // Use the registered strategy to evaluate entry signal
+    const strategy = registry.getStrategyByName('mean_reversion_v1');
+    const openPos = this.positionManager.getOpenPositions()[0] ?? null;
+    const signal = strategy?.evaluate({
+      currentPrice: price,
+      sma,
+      volatility: vol,
+      openPosition: openPos
+        ? { id: openPos.id, entryPrice: openPos.entryPrice, amount: openPos.amount, strategy: openPos.strategy }
+        : null,
+      config: registry.getConfig('mean_reversion_v1'),
+    }) ?? { action: 'hold' as const, reason: 'no_strategy' };
+
     console.log(
-      `[AGENT] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% entrySignal=${entrySignal}`,
+      `[AGENT] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% entrySignal=${signal.action}`,
     );
-    if (entrySignal === 'buy') {
+    if (signal.action === 'buy') {
       await this.executeMeanReversionBuy(price);
     }
   }
@@ -1070,9 +1097,80 @@ export class TradingAgent {
     if (ok) {
       saveRuntimeConfigFile(
         snapshotToPersistable(this.getRuntimeConfigView()),
+        registry.getAllConfigs(),
       );
       console.log(`[CONFIG] Runtime override applied: ${key}=${v} (persisted)`);
     }
+  }
+
+  /** Update a strategy-specific config key, persist to disk. */
+  setStrategyConfig(strategyName: string, key: string, rawValue: string): boolean {
+    const num = Number(rawValue);
+    if (Number.isNaN(num)) return false;
+    const s = registry.getStrategyByName(strategyName);
+    if (!s) return false;
+    registry.setConfigKey(strategyName, key, num);
+    saveRuntimeConfigFile(
+      snapshotToPersistable(this.getRuntimeConfigView()),
+      registry.getAllConfigs(),
+    );
+    console.log(`[CONFIG] Strategy ${strategyName}.${key}=${num} (persisted)`);
+    return true;
+  }
+
+  getStrategyConfig(strategyName: string): Record<string, number> | null {
+    const s = registry.getStrategyByName(strategyName);
+    if (!s) return null;
+    return registry.getConfig(strategyName);
+  }
+
+  async getStrategyStatus(strategyName: string): Promise<{
+    name: string;
+    displayName: string;
+    description: string;
+    enabled: boolean;
+    tradeCount: number;
+    closedCount: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    totalPnL: number;
+    openPositions: number;
+    avgHoldTimeMinutes: number | null;
+    lastTradeTimestamp: string | null;
+    config: Record<string, number>;
+  } | null> {
+    const s = registry.getStrategyByName(strategyName);
+    if (!s) return null;
+
+    const stats = getStrategyStats(strategyName, this.mode);
+    const openCount = this.positionManager
+      .getOpenPositions()
+      .filter((p) => p.strategy === strategyName).length;
+
+    // Compute avg hold time from closed-positions.json filtered by strategy
+    const allClosed = this.positionManager.getClosedPositions(10_000);
+    const stratClosed = allClosed.filter((c) => c.strategy === strategyName);
+    let avgHoldTimeMinutes: number | null = null;
+    if (stratClosed.length > 0) {
+      const totalMs = stratClosed.reduce((sum, c) => {
+        const entry = new Date(c.entryTime).getTime();
+        const exit = new Date(c.exitTime).getTime();
+        return sum + (exit - entry);
+      }, 0);
+      avgHoldTimeMinutes = totalMs / stratClosed.length / 60_000;
+    }
+
+    return {
+      name: s.name,
+      displayName: s.displayName,
+      description: s.description,
+      enabled: this.cfg.strategies.includes(strategyName),
+      ...stats,
+      openPositions: openCount,
+      avgHoldTimeMinutes,
+      config: registry.getConfig(strategyName),
+    };
   }
 
   getRuntimeConfigView(): Record<string, string | number | null> {
@@ -1087,6 +1185,22 @@ export class TradingAgent {
       cooldownMinutes: this.riskManager.cooldownNormalMs / 60_000,
       cooldownLossMinutes: this.riskManager.cooldownAfterLossMs / 60_000,
     };
+  }
+
+  getStrategiesList(): Array<{
+    name: string;
+    displayName: string;
+    description: string;
+    enabled: boolean;
+    config: Record<string, number>;
+  }> {
+    return registry.getStrategies().map((s) => ({
+      name: s.name,
+      displayName: s.displayName,
+      description: s.description,
+      enabled: this.cfg.strategies.includes(s.name),
+      config: registry.getConfig(s.name),
+    }));
   }
 
   getPaperEngine(): PaperTradingEngine {
