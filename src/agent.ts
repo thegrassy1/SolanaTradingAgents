@@ -1250,7 +1250,11 @@ export class TradingAgent {
     losses: number;
     winRate: number;
     totalPnL: number;
+    avgWin: number | null;
+    avgLoss: number | null;
+    expectancy: number | null;
     openPositions: number;
+    cooldownRemaining: number;
     avgHoldTimeMinutes: number | null;
     lastTradeTimestamp: string | null;
     config: Record<string, number>;
@@ -1301,6 +1305,9 @@ export class TradingAgent {
       portfolio = { ...pnl, balances: balancesJson };
     }
 
+    const cooldownUntil = this.strategyCooldowns.get(strategyName) ?? 0;
+    const cooldownRemaining = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
+
     return {
       name: s.name,
       displayName: s.displayName,
@@ -1308,6 +1315,7 @@ export class TradingAgent {
       enabled: this.cfg.strategies.includes(strategyName),
       ...stats,
       openPositions: openCount,
+      cooldownRemaining,
       avgHoldTimeMinutes,
       config: registry.getConfig(strategyName),
       portfolio,

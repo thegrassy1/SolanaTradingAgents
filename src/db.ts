@@ -467,6 +467,9 @@ export type StrategyStats = {
   losses: number;
   winRate: number;
   totalPnL: number;
+  avgWin: number | null;
+  avgLoss: number | null;
+  expectancy: number | null;
   lastTradeTimestamp: string | null;
 };
 
@@ -480,6 +483,8 @@ export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'):
     wins: number;
     losses: number;
     total_pnl: number | null;
+    avg_win: number | null;
+    avg_loss: number | null;
     last_ts: string | null;
   };
   const row = db
@@ -490,6 +495,8 @@ export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'):
          SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
          SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
          COALESCE(SUM(realized_pnl), 0) AS total_pnl,
+         AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END) AS avg_win,
+         AVG(CASE WHEN realized_pnl < 0 THEN realized_pnl END) AS avg_loss,
          MAX(timestamp) AS last_ts
        FROM trades
        WHERE strategy = ? ${modeClause}`,
@@ -499,6 +506,13 @@ export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'):
   const wins = row.wins ?? 0;
   const losses = row.losses ?? 0;
   const decided = wins + losses;
+  const avgWin = row.avg_win ?? null;
+  const avgLoss = row.avg_loss ?? null;
+  const expectancy =
+    decided > 0
+      ? (avgWin !== null ? avgWin * (wins / decided) : 0) +
+        (avgLoss !== null ? avgLoss * (losses / decided) : 0)
+      : null;
   return {
     tradeCount: row.trade_count ?? 0,
     closedCount: row.closed_count ?? 0,
@@ -506,6 +520,9 @@ export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'):
     losses,
     winRate: decided === 0 ? 0 : (wins / decided) * 100,
     totalPnL: row.total_pnl ?? 0,
+    avgWin,
+    avgLoss,
+    expectancy,
     lastTradeTimestamp: row.last_ts ?? null,
   };
 }
