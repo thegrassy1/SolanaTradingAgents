@@ -694,15 +694,18 @@ async function refresh(){
     setText('perfPnl',fmtUsd(primaryPnl));
     document.getElementById('perfPnl').className='val-xl '+(primaryPnl>=0?'pos':'neg');
     setText('perfPnlSign',(primaryPnl>=0?'+':'')+fmtUsd(primaryPnl));
+    var avgWin=ss&&ss.avgWin!=null?ss.avgWin:stats.avgWin;
+    var avgLoss=ss&&ss.avgLoss!=null?ss.avgLoss:stats.avgLoss;
+    var expectancy=ss&&ss.expectancy!=null?ss.expectancy:stats.expectancy;
     setHtml('kpiPerf',
       '<div class="kpi"><div class="k">Win rate</div><div class="v '+(decided>=5?clsPnL(winRate-50):'neu')+'">'+(decided>=5?fmtPct(winRate):'\u2014 <span style="font-size:10px;color:var(--muted)">need 5+</span>')+'</div></div>'+
-      '<div class="kpi"><div class="k">Avg win</div><div class="v pos">'+(stats.avgWin!=null?'+'+fmtUsd(stats.avgWin):'\u2014')+'</div></div>'+
-      '<div class="kpi"><div class="k">Avg loss</div><div class="v neg">'+(stats.avgLoss!=null?fmtUsd(stats.avgLoss):'\u2014')+'</div></div>'
+      '<div class="kpi"><div class="k">Avg win</div><div class="v pos">'+(avgWin!=null?'+'+fmtUsd(avgWin):'\u2014')+'</div></div>'+
+      '<div class="kpi"><div class="k">Avg loss</div><div class="v neg">'+(avgLoss!=null?fmtUsd(avgLoss):'\u2014')+'</div></div>'
     );
     setHtml('kpiPerf2',
       '<div class="kpi"><div class="k">Today (realized)</div><div class="v '+clsPnL(dailyNet)+'">'+sign(dailyNet)+fmtUsd(dailyNet)+'</div></div>'+
       '<div class="kpi"><div class="k">Closed trades</div><div class="v">'+(sClosed!=null?sClosed:stats.closedTrades)+'</div></div>'+
-      '<div class="kpi"><div class="k">Expectancy</div><div class="v '+(stats.expectancy!=null?clsPnL(stats.expectancy):'neu')+'">'+(stats.expectancy!=null?sign(stats.expectancy)+fmtUsd(stats.expectancy)+'/trade':'\u2014')+'</div></div>'
+      '<div class="kpi"><div class="k">Expectancy</div><div class="v '+(expectancy!=null?clsPnL(expectancy):'neu')+'">'+(expectancy!=null?sign(expectancy)+fmtUsd(expectancy)+'/trade':'\u2014')+'</div></div>'
     );
     /* Show global P&L as a note when strategy is isolated */
     if(sPnl!=null&&Math.abs(sPnl-tPnl)>0.001){
@@ -768,8 +771,8 @@ async function refresh(){
       '<div class="kpi"><div class="k">Daily P&amp;L (net)</div><div class="v '+clsPnL(drNet)+'">'+sign(drNet)+fmtUsd(drNet)+'</div>'+
         (Math.abs(drGross-drNet)>0.0001?'<div class="meta mono" style="font-size:10px;margin-top:2px"><span class="tag gross">GROSS</span>'+sign(drGross)+fmtUsd(drGross)+'</div>':'')+
       '</div>'+
-      '<div class="kpi"><div class="k">Cooldown</div><div class="v">'+(st&&st.cooldownRemaining>0?st.cooldownRemaining+'s':'None')+'</div></div>'+
-      '<div class="kpi"><div class="k">Open</div><div class="v">'+(st?st.openPositionsCount:0)+' / '+risk.maxOpenPositions+'</div></div>'
+      '<div class="kpi"><div class="k">Cooldown</div><div class="v">'+((ss&&ss.cooldownRemaining>0)?ss.cooldownRemaining+'s':'None')+'</div></div>'+
+      '<div class="kpi"><div class="k">Open</div><div class="v">'+((ss!=null?ss.openPositions:0))+' / '+risk.maxOpenPositions+'</div></div>'
     );
     setHtml('riskDetail',
       '<div class="kpi"><div class="k">Stop loss</div><div class="v">'+(Number(risk.stopLossPercent)*100).toFixed(2)+'%</div></div>'+
