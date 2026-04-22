@@ -690,7 +690,7 @@ async function refresh(){
     var tPnl=stats.totalRealizedPnl||0;
     var winRate=(sWr!=null)?sWr:(stats.winRate||0);
     var decided=(sWins!=null&&sLosses!=null)?(sWins+sLosses):(stats.wins+stats.losses);
-    var dailyNet=risk?(risk.dailyRealizedPnLNet!=null?risk.dailyRealizedPnLNet:risk.dailyRealizedPnL||0):0;
+    var dailyNet=ss&&ss.dailyRealizedPnLNet!=null?ss.dailyRealizedPnLNet:(ss&&ss.dailyRealizedPnL!=null?ss.dailyRealizedPnL:(risk?(risk.dailyRealizedPnLNet!=null?risk.dailyRealizedPnLNet:risk.dailyRealizedPnL||0):0));
     setText('perfPnl',fmtUsd(primaryPnl));
     document.getElementById('perfPnl').className='val-xl '+(primaryPnl>=0?'pos':'neg');
     setText('perfPnlSign',(primaryPnl>=0?'+':'')+fmtUsd(primaryPnl));

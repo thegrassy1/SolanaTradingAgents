@@ -69,6 +69,11 @@ export class TradingAgent {
   private dailyStartingValueQuote = 0;
   private dailyRealizedPnL = 0;
   private dailyRealizedPnLNet = 0;
+  /** Per-strategy daily tracking (keyed by strategy name). */
+  private strategyDailyDateKey: Map<string, string> = new Map();
+  private strategyDailyStartValue: Map<string, number> = new Map();
+  private strategyDailyPnL: Map<string, number> = new Map();
+  private strategyDailyPnLNet: Map<string, number> = new Map();
   /** @deprecated use strategyLastTradeResult */
   private lastTradeResult: TradeOutcome = null;
   private positionHoldLastLogMs = new Map<string, number>();
@@ -164,6 +169,22 @@ export class TradingAgent {
     if (restoredPnl !== 0) {
       this.dailyRealizedPnL = restoredPnl;
       console.log(`[AGENT] Restored daily realized P&L from DB: $${restoredPnl.toFixed(2)}`);
+    }
+    // Per-strategy restore from DB
+    for (const stratName of ALL_STRATEGY_NAMES) {
+      this.strategyDailyDateKey.set(stratName, today);
+      const stratRow = db
+        .prepare(
+          `SELECT COALESCE(SUM(realized_pnl), 0) AS total
+           FROM trades
+           WHERE mode = ? AND strategy = ? AND date(timestamp) = ? AND realized_pnl IS NOT NULL`,
+        )
+        .get(this.mode, stratName, today) as { total: number };
+      const stratPnl = stratRow?.total ?? 0;
+      if (stratPnl !== 0) {
+        this.strategyDailyPnL.set(stratName, stratPnl);
+        console.log(`[AGENT][${stratName}] Restored daily P&L from DB: $${stratPnl.toFixed(2)}`);
+      }
     }
   }
 
@@ -270,6 +291,7 @@ export class TradingAgent {
 
   private async ensureDailyNav(): Promise<void> {
     const key = new Date().toISOString().slice(0, 10);
+    // Global aggregate
     if (this.dailyDateKeyUtc !== key) {
       this.dailyDateKeyUtc = key;
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
@@ -282,6 +304,25 @@ export class TradingAgent {
     } else if (this.dailyStartingValueQuote <= 0) {
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
       saveDailyState({ date: key, startingValueQuote: this.dailyStartingValueQuote });
+    }
+    // Per-strategy: iterate all registered strategies (even quiet ones)
+    for (const stratName of ALL_STRATEGY_NAMES) {
+      const engine = this.portfolios.get(stratName);
+      if (!engine) continue;
+      const prevKey = this.strategyDailyDateKey.get(stratName);
+      if (prevKey !== key) {
+        // Day rolled over — reset and snapshot new baseline
+        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint);
+        this.strategyDailyDateKey.set(stratName, key);
+        this.strategyDailyStartValue.set(stratName, totalValue);
+        this.strategyDailyPnL.set(stratName, 0);
+        this.strategyDailyPnLNet.set(stratName, 0);
+        console.log(`[AGENT][${stratName}] UTC day ${key}: daily NAV baseline=${totalValue.toFixed(2)}`);
+      } else if ((this.strategyDailyStartValue.get(stratName) ?? 0) <= 0) {
+        // First tick today — set baseline
+        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint);
+        this.strategyDailyStartValue.set(stratName, totalValue);
+      }
     }
   }
 
@@ -454,8 +495,12 @@ export class TradingAgent {
         { exitQuoteAmount, exitFeesQuote },
       );
       anyClosed = true;
-      this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
-      this.dailyRealizedPnLNet += closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      const grossPnl = closed.realizedPnlGross ?? closed.realizedPnlQuote;
+      const netPnl = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      this.dailyRealizedPnL += grossPnl;
+      this.dailyRealizedPnLNet += netPnl;
+      this.strategyDailyPnL.set(pos.strategy, (this.strategyDailyPnL.get(pos.strategy) ?? 0) + grossPnl);
+      this.strategyDailyPnLNet.set(pos.strategy, (this.strategyDailyPnLNet.get(pos.strategy) ?? 0) + netPnl);
       const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
       this.armStrategyCooldown(pos.strategy, netForOutcome >= 0 ? 'win' : 'loss');
       logTrade({
@@ -498,8 +543,8 @@ export class TradingAgent {
       const openCount = this.positionManager.getOpenPositions().length;
       const gate = this.riskManager.canOpenPosition(
         openCount,
-        this.dailyRealizedPnL,
-        this.dailyStartingValueQuote,
+        this.strategyDailyPnL.get(stratName) ?? this.dailyRealizedPnL,
+        this.strategyDailyStartValue.get(stratName) ?? this.dailyStartingValueQuote,
       );
       if (!gate.allowed) {
         console.log(`[AGENT][${stratName}] Entry blocked: ${gate.reason ?? 'risk'}`);
@@ -859,8 +904,12 @@ export class TradingAgent {
         'manual',
         { exitQuoteAmount, exitFeesQuote },
       );
-      this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
-      this.dailyRealizedPnLNet += closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      const grossPnlM = closed.realizedPnlGross ?? closed.realizedPnlQuote;
+      const netPnlM = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+      this.dailyRealizedPnL += grossPnlM;
+      this.dailyRealizedPnLNet += netPnlM;
+      this.strategyDailyPnL.set('mean_reversion_v1', (this.strategyDailyPnL.get('mean_reversion_v1') ?? 0) + grossPnlM);
+      this.strategyDailyPnLNet.set('mean_reversion_v1', (this.strategyDailyPnLNet.get('mean_reversion_v1') ?? 0) + netPnlM);
       const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
       this.armStrategyCooldown('mean_reversion_v1', netForOutcome >= 0 ? 'win' : 'loss');
       const merged: TradeRecord = {
@@ -958,8 +1007,12 @@ export class TradingAgent {
       exitQuoteAmount,
       exitFeesQuote,
     });
-    this.dailyRealizedPnL += closed.realizedPnlGross ?? closed.realizedPnlQuote;
-    this.dailyRealizedPnLNet += closed.realizedPnlNet ?? closed.realizedPnlQuote;
+    const grossPnlC = closed.realizedPnlGross ?? closed.realizedPnlQuote;
+    const netPnlC = closed.realizedPnlNet ?? closed.realizedPnlQuote;
+    this.dailyRealizedPnL += grossPnlC;
+    this.dailyRealizedPnLNet += netPnlC;
+    this.strategyDailyPnL.set(pos.strategy, (this.strategyDailyPnL.get(pos.strategy) ?? 0) + grossPnlC);
+    this.strategyDailyPnLNet.set(pos.strategy, (this.strategyDailyPnLNet.get(pos.strategy) ?? 0) + netPnlC);
     const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
     this.armStrategyCooldown(pos.strategy, netForOutcome >= 0 ? 'win' : 'loss');
     const merged: TradeRecord = {
@@ -1255,6 +1308,9 @@ export class TradingAgent {
     expectancy: number | null;
     openPositions: number;
     cooldownRemaining: number;
+    dailyRealizedPnL: number;
+    dailyRealizedPnLNet: number;
+    dailyStartingValueQuote: number;
     avgHoldTimeMinutes: number | null;
     lastTradeTimestamp: string | null;
     config: Record<string, number>;
@@ -1316,6 +1372,9 @@ export class TradingAgent {
       ...stats,
       openPositions: openCount,
       cooldownRemaining,
+      dailyRealizedPnL: this.strategyDailyPnL.get(strategyName) ?? 0,
+      dailyRealizedPnLNet: this.strategyDailyPnLNet.get(strategyName) ?? 0,
+      dailyStartingValueQuote: this.strategyDailyStartValue.get(strategyName) ?? 0,
       avgHoldTimeMinutes,
       config: registry.getConfig(strategyName),
       portfolio,
