@@ -1,4 +1,6 @@
 import type { Strategy } from './base';
+import { BreakoutStrategy } from './breakout';
+import { BuyAndHoldStrategy } from './buyAndHold';
 import { MeanReversionStrategy } from './meanReversion';
 
 export class StrategyRegistry {
@@ -7,6 +9,8 @@ export class StrategyRegistry {
 
   constructor() {
     this.register(new MeanReversionStrategy());
+    this.register(new BreakoutStrategy());
+    this.register(new BuyAndHoldStrategy());
   }
 
   private register(s: Strategy): void {

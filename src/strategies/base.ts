@@ -5,6 +5,8 @@ export interface StrategyContext {
   openPosition: { id: string; entryPrice: number; amount: bigint; strategy: string } | null;
   /** Live numeric config for this strategy (merged defaults + overrides). */
   config: Record<string, number>;
+  /** Recent price history (newest last). Strategies that don't need it can ignore it. */
+  priceHistory?: Array<{ t: number; price: number }>;
 }
 
 export interface StrategySignal {

@@ -195,6 +195,12 @@ async function handleRequest(
       return;
     }
 
+    if (method === 'GET' && pathname === '/portfolios') {
+      const data = await agent.getPortfoliosApi();
+      done(200, data);
+      return;
+    }
+
     if (method === 'GET' && pathname === '/positions') {
       const px = agent.priceMonitor.getLatestPrice();
       done(200, agent.getPositionsApi(px));

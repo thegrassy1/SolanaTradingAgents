@@ -6,7 +6,7 @@ import type { TradeRecord } from './types';
 import { getTokenDecimals, getTokenSymbol } from './tokenInfo';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
-const PORTFOLIO_FILE = path.join(DATA_DIR, 'paper-portfolio.json');
+const DEFAULT_PORTFOLIO_FILE = path.join(DATA_DIR, 'paper-portfolio.json');
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 function ensureDataDir(): void {
@@ -42,15 +42,21 @@ export class PaperTradingEngine {
   private initialQuoteValue: number | null = null;
   private quoteMintForPnl: string;
   private defaultInitialHuman: Record<string, number>;
+  private readonly portfolioFile: string;
 
-  constructor(initialBalancesHuman: Record<string, number>, quoteMintForPnl: string) {
+  constructor(
+    initialBalancesHuman: Record<string, number>,
+    quoteMintForPnl: string,
+    storagePath?: string,
+  ) {
+    this.portfolioFile = storagePath ?? DEFAULT_PORTFOLIO_FILE;
     this.quoteMintForPnl = quoteMintForPnl;
     this.defaultInitialHuman = { ...initialBalancesHuman };
-    if (fs.existsSync(PORTFOLIO_FILE)) {
+    if (fs.existsSync(this.portfolioFile)) {
       try {
-        const parsed = JSON.parse(fs.readFileSync(PORTFOLIO_FILE, 'utf8')) as PortfolioSnapshot;
+        const parsed = JSON.parse(fs.readFileSync(this.portfolioFile, 'utf8')) as PortfolioSnapshot;
         this.hydrateFromSnapshot(parsed, initialBalancesHuman);
-        console.log('[PAPER] Restored portfolio from disk');
+        console.log(`[PAPER] Restored portfolio from ${path.basename(this.portfolioFile)}`);
         return;
       } catch (e) {
         console.warn('[PAPER] Failed to restore portfolio, using fresh state:', e);
@@ -104,7 +110,7 @@ export class PaperTradingEngine {
   }
 
   private persist(): void {
-    ensureDataDir();
+    fs.mkdirSync(path.dirname(this.portfolioFile), { recursive: true });
     const snap: PortfolioSnapshot = {
       balances: {},
       tradeHistory: this.tradeHistory,
@@ -120,7 +126,7 @@ export class PaperTradingEngine {
     for (const [k, v] of Object.entries(this.initialBalancesSmallest)) {
       snap.initialBalancesSmallest[k] = v.toString();
     }
-    fs.writeFileSync(PORTFOLIO_FILE, JSON.stringify(snap, null, 2), 'utf8');
+    fs.writeFileSync(this.portfolioFile, JSON.stringify(snap, null, 2), 'utf8');
   }
 
   async executePaperTrade(
