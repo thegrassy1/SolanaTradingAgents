@@ -23,7 +23,7 @@ A Solana mean-reversion trading agent built on the Jupiter Ultra API. Supports p
 |---|---|
 | `src/index.ts` | Entry point — wires agent, API server, scheduler, and PM2 signal handlers |
 | `src/agent.ts` | `TradingAgent` class — poll loop, mean-reversion signal, position open/close logic |
-| `src/api.ts` | Express HTTP API — all REST endpoints, runtime config mutation, manual trade execution |
+| `src/api.ts` | Native Node.js `http` HTTP API (manual if/else routing, no framework) — all REST endpoints, runtime config mutation, manual trade execution |
 | `src/config.ts` | Loads all config from env vars with typed defaults |
 | `src/dashboard.ts` | Generates the mobile web dashboard HTML served at `GET /` |
 | `src/db.ts` | SQLite schema, `logTrade`, `logPrice`, `getRecentTrades`, `getTradeSummary` |

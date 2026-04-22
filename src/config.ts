@@ -44,6 +44,8 @@ export interface AppConfig {
    * balance on every paper swap; tune to approximate congestion).
    */
   paperPriorityFeeLamports: number;
+  /** Names of enabled strategies (comma-separated STRATEGIES env var). */
+  strategies: string[];
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -122,4 +124,8 @@ export const config: AppConfig = {
   paperTakerFeeBps: parseIntEnv('PAPER_TAKER_FEE_BPS', 10),
   paperNetworkFeeLamports: parseIntEnv('PAPER_NETWORK_FEE_LAMPORTS', 5_000),
   paperPriorityFeeLamports: parseIntEnv('PAPER_PRIORITY_FEE_LAMPORTS', 50_000),
+  strategies: (process.env.STRATEGIES ?? 'mean_reversion_v1,breakout_v1,buy_and_hold_v1')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 };

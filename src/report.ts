@@ -293,5 +293,28 @@ export async function buildDailyReport(
   lines.push(`Cooldown: ${escapeHtml(cooldownLine)}`);
   lines.push(`Threshold: ${fmtNum(thresholdPct, 1)}%`);
 
+  // Strategy breakdown
+  const stratList = agent.getStrategiesList();
+  const enabledStrats = stratList.filter((s) => s.enabled);
+  if (enabledStrats.length > 1) {
+    lines.push('');
+    lines.push('<b>Strategy Breakdown</b>');
+    for (const s of enabledStrats) {
+      const sts = await agent.getStrategyStatus(s.name);
+      if (!sts) continue;
+      const port = sts.portfolio;
+      const portLine = port
+        ? `portfolio ${fmtUsdSigned(port.pnl)} (${fmtPctSigned(port.pnlPercent)})`
+        : '';
+      const wrLine =
+        sts.closedCount >= 3
+          ? `${fmtPctPlain(sts.winRate)} win rate`
+          : `${String(sts.closedCount)} closes (need ≥3 for win rate)`;
+      lines.push(
+        `<b>${escapeHtml(s.displayName)}</b>: ${wrLine} \u00b7 ${fmtUsdSigned(sts.totalPnL)} all-time${portLine ? ' \u00b7 ' + portLine : ''}`,
+      );
+    }
+  }
+
   return lines.join('\n');
 }

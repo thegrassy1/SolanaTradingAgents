@@ -89,6 +89,50 @@ function migrateTradesColumns(): void {
 
 migrateTradesColumns();
 
+function ensureMigrationsTable(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS migrations (
+      name TEXT PRIMARY KEY,
+      applied_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+function hasMigration(name: string): boolean {
+  const row = db
+    .prepare('SELECT 1 AS found FROM migrations WHERE name = ?')
+    .get(name) as { found: number } | undefined;
+  return !!row;
+}
+
+function recordMigration(name: string): void {
+  db.prepare("INSERT OR IGNORE INTO migrations (name) VALUES (?)").run(name);
+}
+
+function normalizeStrategyNames(): void {
+  const MIGRATION = 'normalize_strategy_names_v1';
+  ensureMigrationsTable();
+  if (hasMigration(MIGRATION)) return;
+
+  // Old rows may have NULL, '', or the short name 'mean_reversion'
+  const result = db
+    .prepare(
+      `UPDATE trades
+       SET strategy = 'mean_reversion_v1'
+       WHERE strategy IS NULL OR strategy = '' OR strategy = 'mean_reversion'`,
+    )
+    .run();
+
+  if (result.changes > 0) {
+    console.log(
+      `[DB] Migration ${MIGRATION}: normalized ${result.changes} rows to strategy='mean_reversion_v1'`,
+    );
+  }
+  recordMigration(MIGRATION);
+}
+
+normalizeStrategyNames();
+
 function tradeUsdValue(
   mint: string,
   amountStr: string,
@@ -413,6 +457,56 @@ export function getClosedExitStats(
     avgLoss: losses > 0 ? sumLoss / losses : null,
     winRatePct: decided === 0 ? 0 : (wins / decided) * 100,
     exitReasons,
+  };
+}
+
+export type StrategyStats = {
+  tradeCount: number;
+  closedCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalPnL: number;
+  lastTradeTimestamp: string | null;
+};
+
+export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'): StrategyStats {
+  const modeClause = mode ? 'AND mode = ?' : '';
+  const args: unknown[] = mode ? [strategyName, mode] : [strategyName];
+
+  type Row = {
+    trade_count: number;
+    closed_count: number;
+    wins: number;
+    losses: number;
+    total_pnl: number | null;
+    last_ts: string | null;
+  };
+  const row = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS trade_count,
+         SUM(CASE WHEN exit_reason IS NOT NULL AND exit_reason != '' THEN 1 ELSE 0 END) AS closed_count,
+         SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+         SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+         COALESCE(SUM(realized_pnl), 0) AS total_pnl,
+         MAX(timestamp) AS last_ts
+       FROM trades
+       WHERE strategy = ? ${modeClause}`,
+    )
+    .get(...args) as Row;
+
+  const wins = row.wins ?? 0;
+  const losses = row.losses ?? 0;
+  const decided = wins + losses;
+  return {
+    tradeCount: row.trade_count ?? 0,
+    closedCount: row.closed_count ?? 0,
+    wins,
+    losses,
+    winRate: decided === 0 ? 0 : (wins / decided) * 100,
+    totalPnL: row.total_pnl ?? 0,
+    lastTradeTimestamp: row.last_ts ?? null,
   };
 }
 
