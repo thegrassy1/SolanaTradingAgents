@@ -65,6 +65,8 @@ ssh solana-vps "curl -s http://127.0.0.1:3456/status"
 ssh solana-vps "sqlite3 ~/apps/solana-trader/data/trades.db 'SELECT ...'"
 ```
 
+**Deployment gotcha — VPS tracks `main` only:** The VPS always pulls from `main`. Any work done on feature branches or worktree branches must be merged into `main` before `git pull` on the VPS will pick up the changes. Always verify the merge landed on `main` before declaring a deploy complete — run `git log --oneline main` locally to confirm the commit is there before triggering the VPS pull.
+
 **OpenClaw:**
 - Lives in Docker at `/docker/openclaw-fnwc/`
 - Skill directory: `/docker/openclaw-fnwc/data/.openclaw/skills/solana-trader/`
