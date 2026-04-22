@@ -663,13 +663,14 @@ async function refresh(){
       '<div class="kpi"><div class="k">Volatility</div><div class="v">'+(vol!=null?fmtPct(vol*100):'\u2014')+'</div></div>'
     );
 
-    /* --- Wallet card: balances only, no P&L --- */
+    /* --- Wallet card: per-strategy balances when available, aggregate fallback --- */
     var balHtml='';
     var walletTotal=0;
-    if(st.paperPortfolio&&st.paperPortfolio.balances){
+    var balSrc=(ss&&ss.portfolio&&ss.portfolio.balances)?ss.portfolio.balances:(st&&st.paperPortfolio?st.paperPortfolio.balances:null);
+    if(balSrc){
       var px=lp||0;
-      for(var mint in st.paperPortfolio.balances){
-        var h=st.paperPortfolio.balances[mint].human;
+      for(var mint in balSrc){
+        var h=balSrc[mint].human;
         var usd=mint===SOL?h*px:(mint===USDC?h:0);
         walletTotal+=usd;
         balHtml+='<div class="bal"><div class="sym">'+tokenLabel(mint)+'</div><div class="amt">'+(mint===SOL?fmtSol(h)+' SOL':'$'+fmtNum(h,2))+'</div><div class="usd">\u2248 '+fmtUsd(usd)+'</div></div>';
