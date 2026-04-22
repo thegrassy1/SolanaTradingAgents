@@ -720,13 +720,13 @@ async function refresh(){
   }
 
   var list=document.getElementById('posList');
-  var allPos=pos&&pos.positions?pos.positions:[];
-  var posCount=allPos.length;
+  var filteredPos=pos&&pos.positions?pos.positions.filter(function(p){return p.strategy===activeStrategy;}):[];
+  var posCount=filteredPos.length;
   setText('posCount',posCount?posCount+' open':'none');
   if(posCount){
     var cur=st&&st.latestPrice;
     list.innerHTML='';
-    allPos.forEach(function(p){
+    filteredPos.forEach(function(p){
       var li=document.createElement('li');
       var gross=p.unrealizedPnlGross!=null?p.unrealizedPnlGross:p.unrealizedPnlQuote;
       var net=p.unrealizedPnlNet!=null?p.unrealizedPnlNet:gross;
@@ -734,10 +734,8 @@ async function refresh(){
       li.className='pos-item '+(net>0?'win':net<0?'lose':'');
       var sizeHuman=rawToHuman(p.mint,p.amount||p.sizeRaw||p.size||'0');
       var spent=p.entryQuoteAmount!=null?('spent '+fmtUsd(p.entryQuoteAmount)):'';
-      var stratLabel=p.strategy?p.strategy.replace(/_v\d+$/,'').replace(/_/g,' '):'';
       li.innerHTML=
         '<div class="pos-head"><span class="pos-sym">'+tokenLabel(p.mint)+'</span>'+
-        (stratLabel?'<span class="tag" style="text-transform:capitalize">'+stratLabel+'</span>':'')+
         '<span class="meta mono">entry '+fmtUsd(p.entryPrice)+' \u2192 '+(cur!=null?fmtUsd(cur):'\u2014')+(spent?' \u00b7 '+spent:'')+'</span>'+
         '<span class="pos-pnl '+pnlCls+'"><span class="tag net">NET</span>'+arrow(net)+' '+sign(net)+fmtUsd(net)+'</span></div>'+
         (p.unrealizedPnlNet!=null&&Math.abs(gross-net)>0.0001?
