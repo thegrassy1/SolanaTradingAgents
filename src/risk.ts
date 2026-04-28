@@ -28,13 +28,15 @@ export class RiskManager {
     portfolioValueInQuote: number,
     entryPrice: number,
     stopLossPrice: number,
+    riskMultiplier = 1.0,
   ): { solHuman: number; usdcMicroSpend: bigint } {
     const denom = entryPrice - stopLossPrice;
     if (denom <= 0 || !Number.isFinite(portfolioValueInQuote) || portfolioValueInQuote <= 0) {
       return { solHuman: 0, usdcMicroSpend: 0n };
     }
+    const effectiveRisk = this.riskPerTradePercent * Math.max(0.1, riskMultiplier);
     const solHuman =
-      (portfolioValueInQuote * this.riskPerTradePercent) / denom;
+      (portfolioValueInQuote * effectiveRisk) / denom;
     if (!Number.isFinite(solHuman) || solHuman <= 0) {
       return { solHuman: 0, usdcMicroSpend: 0n };
     }

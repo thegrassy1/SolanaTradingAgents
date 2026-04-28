@@ -53,6 +53,16 @@ export function initDatabase(): void {
       candidate_signals TEXT,
       learnings_snapshot TEXT
     );
+    CREATE TABLE IF NOT EXISTS ai_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT DEFAULT (datetime('now')),
+      source TEXT NOT NULL,
+      strategy TEXT NOT NULL,
+      key TEXT NOT NULL,
+      old_value REAL,
+      new_value REAL NOT NULL,
+      reason TEXT
+    );
   `);
 }
 
@@ -568,6 +578,37 @@ export function logAiDecision(rec: AiDecisionRecord): void {
 export function getRecentAiDecisions(limit: number): unknown[] {
   return db
     .prepare(`SELECT * FROM ai_decisions ORDER BY id DESC LIMIT ?`)
+    .all(limit);
+}
+
+export type AiActionRecord = {
+  timestamp: string;
+  source: string;        // 'reviewer' | 'auto_tune' | 'risk_rebalance'
+  strategy: string;
+  key: string;
+  oldValue: number | null;
+  newValue: number;
+  reason: string;
+};
+
+export function logAiAction(rec: AiActionRecord): void {
+  db.prepare(
+    `INSERT INTO ai_actions (timestamp, source, strategy, key, old_value, new_value, reason)
+     VALUES (@timestamp, @source, @strategy, @key, @old_value, @new_value, @reason)`,
+  ).run({
+    timestamp: rec.timestamp,
+    source: rec.source,
+    strategy: rec.strategy,
+    key: rec.key,
+    old_value: rec.oldValue ?? null,
+    new_value: rec.newValue,
+    reason: rec.reason,
+  });
+}
+
+export function getRecentAiActions(limit: number): unknown[] {
+  return db
+    .prepare(`SELECT * FROM ai_actions ORDER BY id DESC LIMIT ?`)
     .all(limit);
 }
 

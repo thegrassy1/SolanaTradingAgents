@@ -74,6 +74,10 @@ body{
 .badge-paper{color:#60a5fa;border-color:rgba(96,165,250,.35);background:var(--acc-bg)}
 .badge-live{color:var(--live);border-color:rgba(245,158,11,.4);background:var(--live-bg)}
 .badge-status{color:var(--txt-2);background:var(--card-2)}
+.badge-regime-ranging{color:#a78bfa;border-color:rgba(167,139,250,.35);background:rgba(167,139,250,.1)}
+.badge-regime-trending_up{color:#22c55e;border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.1)}
+.badge-regime-trending_down{color:#ef4444;border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.1)}
+.badge-regime-dead{color:#6e7a8a;border-color:rgba(110,122,138,.35);background:rgba(110,122,138,.08)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .dot-on{background:var(--ok);box-shadow:0 0 0 3px rgba(34,197,94,.18)}
 .dot-off{background:var(--bad);box-shadow:0 0 0 3px rgba(239,68,68,.15)}
@@ -660,7 +664,8 @@ async function refresh(){
   var st=await jget('/status'),pos=await jget('/positions'),risk=await jget('/risk'),
       hist=await jget('/strategies/'+activeStrategy+'/trades?limit=12'),
       series=await jget('/prices/recent?limit=200'),
-      stats=await jget('/stats');
+      stats=await jget('/stats'),
+      aiActions=await jget('/ai/actions?limit=10');
   /* Fetch all strategy statuses in parallel */
   var allSS=await Promise.all(strategies.map(function(s){return jget('/strategies/'+s.name+'/status');}));
   allSS.forEach(function(data,i){if(data&&strategies[i])strategyStatuses[strategies[i].name]=data;});
@@ -669,6 +674,35 @@ async function refresh(){
   renderSidebar();
   renderCompareTable();
   document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
+
+  /* Regime badge */
+  if(st&&st.regime){
+    var r=st.regime;
+    var rLabel={trending_up:'\u25B2 TRENDING UP',trending_down:'\u25BC TRENDING DOWN',ranging:'\u25C6 RANGING',dead:'\u2014 DEAD'}[r]||r.toUpperCase();
+    setText('regimeBadge',rLabel);
+    setCls('regimeBadge','badge badge-regime-'+r);
+  }
+
+  /* Auto-tune / AI action log */
+  var actSec=document.getElementById('actionsSection');
+  var actList=document.getElementById('actionList');
+  if(actSec&&actList&&aiActions&&Array.isArray(aiActions)&&aiActions.length){
+    actSec.style.display='';
+    setText('actionCount',aiActions.length);
+    actList.innerHTML='';
+    aiActions.forEach(function(a){
+      var src={'reviewer':'&#129302; AI Reviewer','auto_tune':'&#9881; Auto-Tune','risk_rebalance':'&#9878; Risk Rebalance'}[a.source]||(a.source||'?');
+      var div=document.createElement('div');
+      div.className='trade';
+      div.innerHTML=
+        '<div class="trade-time">'+(a.timestamp?fmtTime(a.timestamp):'\u2014')+'</div>'+
+        '<div class="trade-body" style="font-size:12px">'+src+' &nbsp;<b>'+a.strategy+'.'+a.key+'</b>: '+(a.old_value!=null?Number(a.old_value).toPrecision(4)+' \u2192 ':'')+Number(a.new_value).toPrecision(4)+
+          (a.reason?'<div class="trade-reason">'+a.reason+'</div>':'')+'</div>';
+      actList.appendChild(div);
+    });
+  } else if(actSec){
+    actSec.style.display='none';
+  }
 
   if(st){
     var isLive=st.mode==='live';
@@ -835,12 +869,16 @@ async function refresh(){
     var drGross=risk.dailyRealizedPnL||0;
     var drNet=risk.dailyRealizedPnLNet!=null?risk.dailyRealizedPnLNet:drGross;
     var fees=risk.paperFees||{};
+    var mult=ss&&ss.riskMultiplier!=null?ss.riskMultiplier:1;
+    var multCls=mult>1.05?'pos':mult<0.95?'neg':'neu';
+    var regGated=ss&&ss.regimeAllowed===false;
     setHtml('kpiRisk',
       '<div class="kpi"><div class="k">Daily P&amp;L (net)</div><div class="v '+clsPnL(drNet)+'">'+sign(drNet)+fmtUsd(drNet)+'</div>'+
         (Math.abs(drGross-drNet)>0.0001?'<div class="meta mono" style="font-size:10px;margin-top:2px"><span class="tag gross">GROSS</span>'+sign(drGross)+fmtUsd(drGross)+'</div>':'')+
       '</div>'+
       '<div class="kpi"><div class="k">Cooldown</div><div class="v">'+((ss&&ss.cooldownRemaining>0)?ss.cooldownRemaining+'s':'None')+'</div></div>'+
-      '<div class="kpi"><div class="k">Open</div><div class="v">'+((ss!=null?ss.openPositions:0))+' / '+risk.maxOpenPositions+'</div></div>'
+      '<div class="kpi"><div class="k">Open</div><div class="v">'+((ss!=null?ss.openPositions:0))+' / '+risk.maxOpenPositions+'</div></div>'+
+      '<div class="kpi"><div class="k">Risk mult</div><div class="v '+multCls+'">'+mult.toFixed(2)+'x'+(regGated?' <span style="color:var(--bad);font-size:10px">\u26D4 regime</span>':'')+'</div></div>'
     );
     setHtml('riskDetail',
       '<div class="kpi"><div class="k">Stop loss</div><div class="v">'+(Number(risk.stopLossPercent)*100).toFixed(2)+'%</div></div>'+
@@ -972,6 +1010,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
   <div class="brand"><span class="logo">S</span>Solana Trader</div>
   <span id="modeBadge" class="badge badge-paper">PAPER</span>
   <span class="badge badge-status"><span id="runDot" class="dot dot-off"></span><span id="runTxt">Stopped</span></span>
+  <span id="regimeBadge" class="badge badge-regime-ranging" title="Market regime">&#9670; RANGING</span>
   <span class="spacer"></span>
   <span class="meta mono" id="updated">\u2014</span>
   <button type="button" class="btn ghost" id="btnRefresh" title="Refresh now" aria-label="Refresh now">\u21BB</button>
@@ -1071,6 +1110,14 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
   <section class="card">
     <h2>Recent trades</h2>
     <div id="trades" class="trades"></div>
+  </section>
+</div>
+
+<!-- Auto-tune action log (always visible) -->
+<div id="actionsSection" style="margin-top:16px;display:none">
+  <section class="card" style="border-color:rgba(167,139,250,.3)">
+    <h2 style="color:#a78bfa">&#9881; Auto-tune &amp; AI actions <span class="count" id="actionCount">0</span></h2>
+    <div id="actionList" class="trades" style="max-height:200px"></div>
   </section>
 </div>
 

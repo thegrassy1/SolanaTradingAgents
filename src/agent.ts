@@ -8,6 +8,7 @@ import {
   getTradeSummary,
   logPrice,
   logTrade,
+  logAiAction,
 } from './db';
 import { PaperTradingEngine } from './paper';
 import { PositionManager } from './positions';
@@ -27,6 +28,8 @@ import {
 } from './runtimeConfigPersist';
 import type { ExitSignal } from './positions';
 import { loadWallet } from './wallet';
+import { classifyRegime, isRegimeAllowed, type MarketRegime, type RegimeResult } from './regime';
+import type { ReviewerAction } from './ai/reviewer';
 
 const SOL = config.baseMint;
 const USDC = config.quoteMint;
@@ -79,6 +82,22 @@ export class TradingAgent {
   private positionHoldLastLogMs = new Map<string, number>();
   private static readonly POSITION_HOLD_LOG_MS = 120_000;
 
+  // ── Regime classifier ─────────────────────────────────────────────────────
+  private currentRegime: MarketRegime = 'ranging';
+  private currentRegimeResult: RegimeResult | null = null;
+
+  // ── Idle auto-tuner ───────────────────────────────────────────────────────
+  private lastAutoTuneKey = '';  // UTC date string, checked once per day
+  private static readonly IDLE_THRESHOLD_DAYS = 2;
+  private static readonly IDLE_RELAX: Record<string, { key: string; factor: number }> = {
+    mean_reversion_v1: { key: 'threshold',     factor: 0.95 },
+    breakout_v1:       { key: 'minVolatility', factor: 0.85 },
+  };
+
+  // ── Dynamic risk multiplier ───────────────────────────────────────────────
+  private strategyRiskMultiplier: Map<string, number> = new Map();
+  private lastRiskRebalanceKey = '';  // UTC date string, rebalanced daily
+
   constructor(cfg: AppConfig) {
     this.cfg = cfg;
     this.mode = cfg.mode;
@@ -86,6 +105,7 @@ export class TradingAgent {
     this.liveVirtualSol = BigInt(Math.round(cfg.paperInitialSol * 1e9));
     this.liveVirtualUsdc = BigInt(Math.round(cfg.paperInitialUsdc * 1e6));
     this.dailyDateKeyUtc = new Date().toISOString().slice(0, 10);
+    for (const n of ALL_STRATEGY_NAMES) this.strategyRiskMultiplier.set(n, 1.0);
     this.initPortfolios();
     this.priceMonitor = new PriceMonitor(
       cfg.baseMint,
@@ -305,6 +325,10 @@ export class TradingAgent {
       this.dailyStartingValueQuote = await this.portfolioValueQuote();
       saveDailyState({ date: key, startingValueQuote: this.dailyStartingValueQuote });
     }
+    // Daily once-per-day checks (idle tuner + risk rebalance)
+    this.checkIdleStrategies();
+    this.updateRiskMultipliers();
+
     // Per-strategy: iterate all registered strategies (even quiet ones)
     for (const stratName of ALL_STRATEGY_NAMES) {
       const engine = this.portfolios.get(stratName);
@@ -553,10 +577,12 @@ export class TradingAgent {
       const entryPrice = priceSolUsdc;
       const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
       const { totalValue: nav } = await portfolio.getPortfolioValue(this.cfg.quoteMint);
+      const riskMultiplier = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
       const { usdcMicroSpend } = this.riskManager.calculatePositionSize(
         nav,
         entryPrice,
         stopLossPrice,
+        riskMultiplier,
       );
       const maxUsdcRaw =
         this.mode === 'paper' ? portfolio.getBalance(USDC).raw : this.liveVirtualUsdc;
@@ -668,6 +694,152 @@ export class TradingAgent {
 
   // ----- Main evaluate loop -----
 
+  // ── Idle auto-tuner ───────────────────────────────────────────────────────
+
+  /**
+   * Checks each signal strategy once per day. If it hasn't traded in
+   * IDLE_THRESHOLD_DAYS, relaxes its primary entry parameter by the configured
+   * factor and persists the change.
+   */
+  private checkIdleStrategies(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.lastAutoTuneKey === today) return;
+    this.lastAutoTuneKey = today;
+
+    for (const [stratName, relax] of Object.entries(TradingAgent.IDLE_RELAX)) {
+      const row = db
+        .prepare(
+          `SELECT MAX(timestamp) AS last_ts FROM trades WHERE strategy = ? AND mode = ?`,
+        )
+        .get(stratName, this.mode) as { last_ts: string | null };
+      if (!row?.last_ts) continue;
+      const daysSince = (Date.now() - new Date(row.last_ts).getTime()) / 86400000;
+      if (daysSince < TradingAgent.IDLE_THRESHOLD_DAYS) continue;
+
+      const current = registry.getConfig(stratName);
+      const oldVal = current[relax.key] ?? 0;
+      const newVal = oldVal * relax.factor;
+      if (newVal <= 0) continue;
+
+      registry.setConfigKey(stratName, relax.key, newVal);
+      saveRuntimeConfigFile(
+        snapshotToPersistable(this.getRuntimeConfigView()),
+        registry.getAllConfigs(),
+      );
+      logAiAction({
+        timestamp: new Date().toISOString(),
+        source: 'auto_tune',
+        strategy: stratName,
+        key: relax.key,
+        oldValue: oldVal,
+        newValue: newVal,
+        reason: `Idle ${daysSince.toFixed(1)}d — auto-relaxed by ${((1 - relax.factor) * 100).toFixed(0)}%`,
+      });
+      console.log(
+        `[AUTO-TUNE][${stratName}] ${daysSince.toFixed(1)}d idle → ${relax.key}: ${oldVal.toFixed(6)} → ${newVal.toFixed(6)}`,
+      );
+    }
+  }
+
+  // ── Dynamic risk multiplier ───────────────────────────────────────────────
+
+  /**
+   * Runs once per day on rollover. Adjusts each strategy's risk multiplier
+   * based on its 7-day win rate:
+   *   > 60%  → multiply by 1.15 (cap 2.0)
+   *   40-60% → no change
+   *   < 40%  → multiply by 0.85 (floor 0.5)
+   */
+  private updateRiskMultipliers(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.lastRiskRebalanceKey === today) return;
+    this.lastRiskRebalanceKey = today;
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 7);
+    const cutoffIso = cutoff.toISOString();
+
+    for (const stratName of ALL_STRATEGY_NAMES) {
+      if (stratName === 'buy_and_hold_v1') continue;
+
+      const row = db
+        .prepare(
+          `SELECT
+             SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+             SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) AS losses
+           FROM trades
+           WHERE strategy = ? AND mode = ? AND timestamp >= ?
+             AND exit_reason IS NOT NULL AND exit_reason != ''`,
+        )
+        .get(stratName, this.mode, cutoffIso) as { wins: number; losses: number };
+
+      const wins = row?.wins ?? 0;
+      const losses = row?.losses ?? 0;
+      const decided = wins + losses;
+      if (decided < 3) continue; // need at least 3 closed trades to adjust
+
+      const winRate = (wins / decided) * 100;
+      const prev = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
+      let next = prev;
+
+      if (winRate > 60) next = Math.min(prev * 1.15, 2.0);
+      else if (winRate < 40) next = Math.max(prev * 0.85, 0.5);
+
+      if (Math.abs(next - prev) > 0.001) {
+        this.strategyRiskMultiplier.set(stratName, next);
+        logAiAction({
+          timestamp: new Date().toISOString(),
+          source: 'risk_rebalance',
+          strategy: stratName,
+          key: 'riskMultiplier',
+          oldValue: prev,
+          newValue: next,
+          reason: `7d win rate ${winRate.toFixed(1)}% (${wins}W/${losses}L)`,
+        });
+        console.log(
+          `[RISK-REBALANCE][${stratName}] winRate=${winRate.toFixed(1)}% → multiplier ${prev.toFixed(2)} → ${next.toFixed(2)}`,
+        );
+      }
+    }
+  }
+
+  // ── AI reviewer action application ───────────────────────────────────────
+
+  /**
+   * Called by the scheduler after the AI reviewer runs.
+   * Applies validated config changes produced by the reviewer.
+   */
+  applyAiReviewerActions(actions: ReviewerAction[]): void {
+    if (!actions.length) return;
+    for (const action of actions) {
+      if (action.type !== 'strategy_config') continue;
+      const s = registry.getStrategyByName(action.strategy);
+      if (!s) {
+        console.warn(`[AI-REVIEWER] Unknown strategy in action: ${action.strategy}`);
+        continue;
+      }
+      const current = registry.getConfig(action.strategy);
+      const oldVal = current[action.key] ?? null;
+      registry.setConfigKey(action.strategy, action.key, action.value);
+      saveRuntimeConfigFile(
+        snapshotToPersistable(this.getRuntimeConfigView()),
+        registry.getAllConfigs(),
+      );
+      logAiAction({
+        timestamp: new Date().toISOString(),
+        source: 'reviewer',
+        strategy: action.strategy,
+        key: action.key,
+        oldValue: oldVal,
+        newValue: action.value,
+        reason: action.reason,
+      });
+      console.log(
+        `[AI-REVIEWER][APPLIED] ${action.strategy}.${action.key}: ${oldVal ?? '?'} → ${action.value} — ${action.reason}`,
+      );
+    }
+  }
+
   private logPositionHoldIfDue(currentPrice: number, stratName?: string): void {
     const open = this.positionManager
       .getOpenPositions()
@@ -721,12 +893,16 @@ export class TradingAgent {
       await this.processRiskExitSignals(allExits, price);
     }
 
-    // Per-strategy evaluation
+    // Classify market regime once per tick
     const maxLookback = Math.max(...ALL_STRATEGY_NAMES.map((n) => {
       const cfg = registry.getConfig(n);
       return (cfg.lookbackBars ?? 20) + 1;
     }));
-    const priceHistory = this.priceMonitor.getPriceHistory(maxLookback);
+    const priceHistory = this.priceMonitor.getPriceHistory(Math.max(maxLookback, 21));
+    const regimeResult = classifyRegime(priceHistory, vol);
+    this.currentRegime = regimeResult.regime;
+    this.currentRegimeResult = regimeResult;
+
     const enabledStrategies = this.cfg.strategies;
     const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
     const volPct = (vol ?? 0) * 100;
@@ -744,6 +920,14 @@ export class TradingAgent {
 
       if (openPos) {
         this.logPositionHoldIfDue(price, stratName);
+        continue;
+      }
+
+      // Regime gate — skip evaluation if market conditions don't suit this strategy
+      if (!isRegimeAllowed(stratName, this.currentRegime)) {
+        console.log(
+          `[AGENT][${stratName}] Regime gate: ${this.currentRegime} — skipping entry evaluation`,
+        );
         continue;
       }
 
@@ -765,7 +949,7 @@ export class TradingAgent {
       }));
 
       console.log(
-        `[AGENT][${stratName}] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% signal=${signal.action}`,
+        `[AGENT][${stratName}] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% regime=${this.currentRegime} signal=${signal.action}`,
       );
 
       candidateSignals.push({ strategyName: stratName, signal });
@@ -780,7 +964,7 @@ export class TradingAgent {
       await this.handleBuyAndHold(price);
     }
 
-    // Second pass: AI strategy — receives candidate signals from non-AI strategies
+    // Second pass: AI strategy — receives candidate signals + regime context
     if (enabledStrategies.includes('ai_strategy_v1')) {
       const aiStrategy = registry.getStrategyByName('ai_strategy_v1');
       if (aiStrategy) {
@@ -789,6 +973,8 @@ export class TradingAgent {
 
         if (aiOpenPos) {
           this.logPositionHoldIfDue(price, 'ai_strategy_v1');
+        } else if (!isRegimeAllowed('ai_strategy_v1', this.currentRegime)) {
+          console.log(`[AGENT][ai_strategy_v1] Regime gate: ${this.currentRegime} — skipping`);
         } else {
           const nowAi = Date.now();
           const aiCooldownUntil = this.strategyCooldowns.get('ai_strategy_v1') ?? 0;
@@ -807,7 +993,7 @@ export class TradingAgent {
             }));
 
             console.log(
-              `[AGENT][ai_strategy_v1] price=${price.toFixed(4)} dev=${deviationPct.toFixed(2)}% signal=${aiSignal.action} reason="${aiSignal.reason}"`,
+              `[AGENT][ai_strategy_v1] price=${price.toFixed(4)} dev=${deviationPct.toFixed(2)}% regime=${this.currentRegime} signal=${aiSignal.action} reason="${aiSignal.reason}"`,
             );
 
             if (aiSignal.action === 'buy') {
@@ -1117,6 +1303,8 @@ export class TradingAgent {
     dailyRealizedPnLNet: number;
     dailyStartingValueQuote: number;
     openPositionsCount: number;
+    regime: MarketRegime;
+    regimeDetail?: RegimeResult;
   }> {
     // Aggregate P&L across all portfolios
     let aggCurrentValue = 0;
@@ -1172,6 +1360,8 @@ export class TradingAgent {
       dailyRealizedPnLNet: this.dailyRealizedPnLNet,
       dailyStartingValueQuote: this.dailyStartingValueQuote,
       openPositionsCount: this.positionManager.getOpenPositions().length,
+      regime: this.currentRegime,
+      regimeDetail: this.currentRegimeResult ?? undefined,
     };
   }
 
@@ -1364,6 +1554,9 @@ export class TradingAgent {
       pnlPercent: number;
       balances: Record<string, { human: number; raw: string }>;
     };
+    riskMultiplier: number;
+    regime: MarketRegime;
+    regimeAllowed: boolean;
   } | null> {
     const s = registry.getStrategyByName(strategyName);
     if (!s) return null;
@@ -1421,6 +1614,9 @@ export class TradingAgent {
       avgHoldTimeMinutes,
       config: registry.getConfig(strategyName),
       portfolio,
+      riskMultiplier: this.strategyRiskMultiplier.get(strategyName) ?? 1.0,
+      regime: this.currentRegime,
+      regimeAllowed: isRegimeAllowed(strategyName, this.currentRegime),
     };
   }
 
