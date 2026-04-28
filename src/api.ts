@@ -5,7 +5,7 @@ import { URL } from 'url';
 import type { TradingAgent } from './agent';
 import { config } from './config';
 import { getDashboardHtml } from './dashboard';
-import { db, getRecentTrades, getTradeSummary, getRecentAiDecisions } from './db';
+import { db, getRecentTrades, getTradeSummary, getRecentAiDecisions, getRecentAiActions } from './db';
 import { buildDailyReport } from './report';
 import { sendTelegramMessage } from './telegram';
 import { getQuote } from './price';
@@ -372,6 +372,12 @@ async function handleRequest(
         const limitRaw = url.searchParams.get('limit') ?? '20';
         const limit = Math.min(200, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
         done(200, getRecentAiDecisions(limit));
+        return;
+      }
+      if (method === 'GET' && pathname === '/ai/actions') {
+        const limitRaw = url.searchParams.get('limit') ?? '20';
+        const limit = Math.min(200, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
+        done(200, getRecentAiActions(limit));
         return;
       }
       if (method === 'GET' && pathname === '/ai/learnings') {

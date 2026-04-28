@@ -46,15 +46,15 @@ const sendDailyReport = async (): Promise<void> => {
 
 const aiReviewEnabled = !!config.anthropicApiKey;
 
+const aiReviewCallback = aiReviewEnabled
+  ? () => runDailyReview((actions) => agent.applyAiReviewerActions(actions))
+  : undefined;
+
 if (config.telegramBotToken && config.telegramChatId) {
-  startScheduler(sendDailyReport, aiReviewEnabled ? runDailyReview : undefined);
-  console.log(
-    '[SCHEDULER] Daily report enabled for',
-    config.reportCron,
-    config.reportTimezone,
-  );
+  startScheduler(sendDailyReport, aiReviewCallback);
+  console.log('[SCHEDULER] Daily report enabled for', config.reportCron, config.reportTimezone);
 } else {
-  startScheduler(sendDailyReport, aiReviewEnabled ? runDailyReview : undefined);
+  startScheduler(sendDailyReport, aiReviewCallback);
   console.log('[SCHEDULER] Telegram not configured — daily reports disabled');
 }
 
