@@ -42,6 +42,17 @@ export function initDatabase(): void {
       sma_20 REAL,
       volatility REAL
     );
+    CREATE TABLE IF NOT EXISTS ai_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT DEFAULT (datetime('now')),
+      action TEXT NOT NULL,
+      reason TEXT,
+      rationale TEXT,
+      confidence INTEGER,
+      price_at_decision REAL,
+      candidate_signals TEXT,
+      learnings_snapshot TEXT
+    );
   `);
 }
 
@@ -525,6 +536,39 @@ export function getStrategyStats(strategyName: string, mode?: 'paper' | 'live'):
     expectancy,
     lastTradeTimestamp: row.last_ts ?? null,
   };
+}
+
+export type AiDecisionRecord = {
+  timestamp: string;
+  action: string;
+  reason: string;
+  rationale: string;
+  confidence: number;
+  priceAtDecision: number;
+  candidateSignals: string;
+  learningsSnapshot: string;
+};
+
+export function logAiDecision(rec: AiDecisionRecord): void {
+  db.prepare(
+    `INSERT INTO ai_decisions (timestamp, action, reason, rationale, confidence, price_at_decision, candidate_signals, learnings_snapshot)
+     VALUES (@timestamp, @action, @reason, @rationale, @confidence, @price_at_decision, @candidate_signals, @learnings_snapshot)`,
+  ).run({
+    timestamp: rec.timestamp,
+    action: rec.action,
+    reason: rec.reason,
+    rationale: rec.rationale,
+    confidence: rec.confidence,
+    price_at_decision: rec.priceAtDecision,
+    candidate_signals: rec.candidateSignals,
+    learnings_snapshot: rec.learningsSnapshot,
+  });
+}
+
+export function getRecentAiDecisions(limit: number): unknown[] {
+  return db
+    .prepare(`SELECT * FROM ai_decisions ORDER BY id DESC LIMIT ?`)
+    .all(limit);
 }
 
 export { db };

@@ -41,7 +41,7 @@ function rawToHumanAmount(mint: string, raw: string | bigint): number {
   return Number(b) / 10 ** getTokenDecimals(mint);
 }
 
-const ALL_STRATEGY_NAMES = ['mean_reversion_v1', 'breakout_v1', 'buy_and_hold_v1'];
+const ALL_STRATEGY_NAMES = ['mean_reversion_v1', 'breakout_v1', 'buy_and_hold_v1', 'ai_strategy_v1'];
 
 export class TradingAgent {
   private readonly cfg: AppConfig;
@@ -731,15 +731,13 @@ export class TradingAgent {
     const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
     const volPct = (vol ?? 0) * 100;
 
+    // First pass: run non-AI, non-buy-and-hold strategies; collect candidate signals
+    const candidateSignals: import('./strategies/base').CandidateSignal[] = [];
+
     for (const stratName of enabledStrategies) {
+      if (stratName === 'ai_strategy_v1' || stratName === 'buy_and_hold_v1') continue;
       const strategy = registry.getStrategyByName(stratName);
       if (!strategy) continue;
-
-      // Buy & Hold is driven by portfolio state, not a signal
-      if (stratName === 'buy_and_hold_v1') {
-        await this.handleBuyAndHold(price);
-        continue;
-      }
 
       const openPos =
         this.positionManager.getOpenPositions().find((p) => p.strategy === stratName) ?? null;
@@ -757,21 +755,66 @@ export class TradingAgent {
         continue;
       }
 
-      const signal = strategy.evaluate({
+      const signal = await Promise.resolve(strategy.evaluate({
         currentPrice: price,
         sma,
         volatility: vol,
         openPosition: null,
         config: registry.getConfig(stratName),
         priceHistory,
-      });
+      }));
 
       console.log(
         `[AGENT][${stratName}] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% signal=${signal.action}`,
       );
 
+      candidateSignals.push({ strategyName: stratName, signal });
+
       if (signal.action === 'buy') {
         await this.executeStrategyBuy(stratName, price);
+      }
+    }
+
+    // Handle Buy & Hold
+    if (enabledStrategies.includes('buy_and_hold_v1')) {
+      await this.handleBuyAndHold(price);
+    }
+
+    // Second pass: AI strategy — receives candidate signals from non-AI strategies
+    if (enabledStrategies.includes('ai_strategy_v1')) {
+      const aiStrategy = registry.getStrategyByName('ai_strategy_v1');
+      if (aiStrategy) {
+        const aiOpenPos =
+          this.positionManager.getOpenPositions().find((p) => p.strategy === 'ai_strategy_v1') ?? null;
+
+        if (aiOpenPos) {
+          this.logPositionHoldIfDue(price, 'ai_strategy_v1');
+        } else {
+          const nowAi = Date.now();
+          const aiCooldownUntil = this.strategyCooldowns.get('ai_strategy_v1') ?? 0;
+          if (nowAi < aiCooldownUntil) {
+            const sec = Math.ceil((aiCooldownUntil - nowAi) / 1000);
+            console.log(`[AGENT][ai_strategy_v1] Cooling down (entries), ${sec}s remaining`);
+          } else {
+            const aiSignal = await Promise.resolve(aiStrategy.evaluate({
+              currentPrice: price,
+              sma,
+              volatility: vol,
+              openPosition: null,
+              config: registry.getConfig('ai_strategy_v1'),
+              priceHistory,
+              candidateSignals,
+            }));
+
+            console.log(
+              `[AGENT][ai_strategy_v1] price=${price.toFixed(4)} dev=${deviationPct.toFixed(2)}% signal=${aiSignal.action} reason="${aiSignal.reason}"`,
+            );
+
+            if (aiSignal.action === 'buy') {
+              await this.executeStrategyBuy('ai_strategy_v1', price);
+            }
+          }
+        }
       }
     }
   }

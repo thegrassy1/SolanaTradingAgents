@@ -8,6 +8,7 @@ import { buildDailyReport } from './report';
 import { startScheduler, stopScheduler } from './scheduler';
 import { sendTelegramMessage } from './telegram';
 import { loadWallet } from './wallet';
+import { runDailyReview } from './ai/reviewer';
 
 dotenv.config();
 
@@ -43,15 +44,24 @@ const sendDailyReport = async (): Promise<void> => {
   }
 };
 
+const aiReviewEnabled = !!config.anthropicApiKey;
+
 if (config.telegramBotToken && config.telegramChatId) {
-  startScheduler(sendDailyReport);
+  startScheduler(sendDailyReport, aiReviewEnabled ? runDailyReview : undefined);
   console.log(
     '[SCHEDULER] Daily report enabled for',
     config.reportCron,
     config.reportTimezone,
   );
 } else {
+  startScheduler(sendDailyReport, aiReviewEnabled ? runDailyReview : undefined);
   console.log('[SCHEDULER] Telegram not configured — daily reports disabled');
+}
+
+if (aiReviewEnabled) {
+  console.log(`[SCHEDULER] AI reviewer enabled for ${config.aiReviewCron} ${config.reportTimezone}`);
+} else {
+  console.log('[SCHEDULER] AI reviewer disabled (no ANTHROPIC_API_KEY)');
 }
 
 function shutdown(): void {

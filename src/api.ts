@@ -1,14 +1,20 @@
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
 import { URL } from 'url';
 import type { TradingAgent } from './agent';
 import { config } from './config';
 import { getDashboardHtml } from './dashboard';
-import { db, getRecentTrades, getTradeSummary } from './db';
+import { db, getRecentTrades, getTradeSummary, getRecentAiDecisions } from './db';
 import { buildDailyReport } from './report';
 import { sendTelegramMessage } from './telegram';
 import { getQuote } from './price';
 import type { TradeRecord } from './types';
 import { loadWallet } from './wallet';
+import { runDailyReview } from './ai/reviewer';
+
+const AI_DIR = path.join(process.cwd(), 'data', 'ai');
+const LEARNINGS_PATH = path.join(AI_DIR, 'LEARNINGS.md');
 
 /** Parse /strategies[/:name[/:sub]]. Returns null if not a strategies path. */
 function parseStrategyPath(
@@ -357,6 +363,39 @@ async function handleRequest(
         const msg = e instanceof Error ? e.message : String(e);
         done(500, { error: msg });
       }
+      return;
+    }
+
+    // AI routes: /ai/decisions, /ai/learnings, /ai/review
+    if (pathname.startsWith('/ai')) {
+      if (method === 'GET' && pathname === '/ai/decisions') {
+        const limitRaw = url.searchParams.get('limit') ?? '20';
+        const limit = Math.min(200, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
+        done(200, getRecentAiDecisions(limit));
+        return;
+      }
+      if (method === 'GET' && pathname === '/ai/learnings') {
+        let content = '';
+        try {
+          if (fs.existsSync(LEARNINGS_PATH)) {
+            content = fs.readFileSync(LEARNINGS_PATH, 'utf8');
+          }
+        } catch {}
+        done(200, { content, path: LEARNINGS_PATH, exists: content.length > 0 });
+        return;
+      }
+      if (method === 'POST' && pathname === '/ai/review') {
+        if (!config.anthropicApiKey) {
+          done(400, { error: 'ANTHROPIC_API_KEY not configured' });
+          return;
+        }
+        void runDailyReview().then(() => {
+          console.log('[AI] Manual review complete');
+        });
+        done(202, { ok: true, message: 'AI review started (runs in background)' });
+        return;
+      }
+      done(404, { error: 'AI route not found' });
       return;
     }
 
