@@ -94,9 +94,11 @@ Should I approve or reject this buy? Reply with JSON only.`;
     });
 
     const rawText = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '';
+    // Strip markdown code fences if the model wraps its JSON
+    const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     let parsed: DeciderOutput;
     try {
-      parsed = JSON.parse(rawText) as DeciderOutput;
+      parsed = JSON.parse(cleaned) as DeciderOutput;
     } catch {
       console.error('[AI-DECIDER] Failed to parse Haiku response:', rawText.slice(0, 200));
       return fallback;

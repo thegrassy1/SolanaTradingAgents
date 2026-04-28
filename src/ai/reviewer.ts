@@ -195,10 +195,12 @@ Produce the JSON response now.`;
     });
 
     const rawText = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '';
+    // Strip markdown code fences if the model wraps its JSON
+    const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
 
     let parsed: { learnings?: string; actions?: unknown[] };
     try {
-      parsed = JSON.parse(rawText) as { learnings?: string; actions?: unknown[] };
+      parsed = JSON.parse(cleaned) as { learnings?: string; actions?: unknown[] };
     } catch {
       console.error('[AI-REVIEWER] Failed to parse JSON response:', rawText.slice(0, 300));
       return;
