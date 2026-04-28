@@ -106,6 +106,9 @@ export class TradingAgent {
     this.liveVirtualUsdc = BigInt(Math.round(cfg.paperInitialUsdc * 1e6));
     this.dailyDateKeyUtc = new Date().toISOString().slice(0, 10);
     for (const n of ALL_STRATEGY_NAMES) this.strategyRiskMultiplier.set(n, 1.0);
+    // Restore daily-once keys from DB so restarts don't retrigger the same day
+    this.lastAutoTuneKey = this.loadLastActionDate('auto_tune');
+    this.lastRiskRebalanceKey = this.loadLastActionDate('risk_rebalance');
     this.initPortfolios();
     this.priceMonitor = new PriceMonitor(
       cfg.baseMint,
@@ -695,6 +698,18 @@ export class TradingAgent {
   // ----- Main evaluate loop -----
 
   // ── Idle auto-tuner ───────────────────────────────────────────────────────
+
+  /** Returns the UTC date (YYYY-MM-DD) of the most recent ai_action with a given source, or '' if none. */
+  private loadLastActionDate(source: string): string {
+    try {
+      const row = db
+        .prepare(`SELECT timestamp FROM ai_actions WHERE source = ? ORDER BY id DESC LIMIT 1`)
+        .get(source) as { timestamp: string } | undefined;
+      return row ? row.timestamp.slice(0, 10) : '';
+    } catch {
+      return '';
+    }
+  }
 
   /**
    * Checks each signal strategy once per day. If it hasn't traded in
