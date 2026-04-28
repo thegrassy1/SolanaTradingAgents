@@ -46,6 +46,10 @@ export interface AppConfig {
   paperPriorityFeeLamports: number;
   /** Names of enabled strategies (comma-separated STRATEGIES env var). */
   strategies: string[];
+  /** Anthropic API key for AI strategy (ANTHROPIC_API_KEY env var). */
+  anthropicApiKey: string;
+  /** Cron expression for AI reviewer (AI_REVIEW_CRON env var). Default: 6 PM CT. */
+  aiReviewCron: string;
 }
 
 function optionalEnv(name: string, defaultValue: string): string {
@@ -128,4 +132,6 @@ export const config: AppConfig = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  anthropicApiKey: (process.env.ANTHROPIC_API_KEY ?? '').trim(),
+  aiReviewCron: optionalEnv('AI_REVIEW_CRON', '0 18 * * *'),
 };

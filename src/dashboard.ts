@@ -415,6 +415,36 @@ body{
 .cmp-tbl td.name-cell:hover{color:var(--acc)}
 .cmp-tbl tr.active-row td.name-cell{color:var(--acc)}
 
+/* AI Reasoning section */
+.card.accent-ai::before{
+  content:"";position:absolute;inset:0 0 auto 0;height:2px;
+  background:linear-gradient(90deg,#a855f7,#06b6d4);opacity:.7;
+}
+.ai-decision-list{margin:0;padding:0;list-style:none;display:grid;gap:8px;max-height:340px;overflow-y:auto}
+.ai-decision{
+  border:1px solid var(--bd);border-radius:var(--radius-sm);
+  padding:10px 12px;background:var(--bg-2);display:grid;gap:4px;
+}
+.ai-decision.approved{border-left:3px solid var(--ok)}
+.ai-decision.rejected{border-left:3px solid var(--bad)}
+.ai-decision-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ai-decision-action{font-size:10px;font-weight:800;letter-spacing:.08em;padding:2px 7px;border-radius:4px;text-transform:uppercase}
+.ai-decision-action.approve{background:var(--ok-bg);color:var(--ok)}
+.ai-decision-action.reject{background:var(--bad-bg);color:var(--bad)}
+.ai-conf{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.ai-time{margin-left:auto;font-family:var(--mono);color:var(--muted);font-size:11px}
+.ai-reason{font-size:12px;color:var(--txt-2);margin-top:2px}
+.ai-rationale{font-size:11px;color:var(--muted);margin-top:2px;font-style:italic;line-height:1.4}
+.ai-learnings-box{
+  background:var(--bg-2);border:1px solid var(--bd);border-radius:var(--radius-sm);
+  padding:12px;max-height:200px;overflow-y:auto;
+  font-size:12px;color:var(--txt-2);line-height:1.6;
+  white-space:pre-wrap;font-family:var(--mono);
+  margin-top:12px;
+}
+.ai-refresh-btn{font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid var(--bd);background:transparent;color:var(--muted);cursor:pointer;font-weight:600;letter-spacing:.04em;transition:all .15s;margin-left:auto}
+.ai-refresh-btn:hover{border-color:var(--bd-2);color:var(--txt-2)}
+
 /* Scrollbar */
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -763,6 +793,44 @@ async function refresh(){
     list.innerHTML='<div class="empty">No open positions</div>';
   }
 
+  /* AI Reasoning section */
+  var aiSec=document.getElementById('aiSection');
+  if(aiSec){
+    if(activeStrategy==='ai_strategy_v1'){
+      aiSec.style.display='';
+      var decisions=await jget('/ai/decisions?limit=10');
+      var learningsData=await jget('/ai/learnings');
+      var dl=document.getElementById('aiDecisionList');
+      if(dl&&decisions&&Array.isArray(decisions)&&decisions.length){
+        setText('aiDecisionCount',decisions.length+' recent');
+        dl.innerHTML='';
+        decisions.forEach(function(d){
+          var li=document.createElement('li');
+          li.className='ai-decision '+(d.action==='approve'?'approved':'rejected');
+          li.innerHTML=
+            '<div class="ai-decision-head">'+
+              '<span class="ai-decision-action '+(d.action==='approve'?'approve':'reject')+'">'+d.action+'</span>'+
+              '<span class="ai-conf">'+d.confidence+'% conf</span>'+
+              (d.price_at_decision?'<span class="ai-conf">\u00b7 $'+Number(d.price_at_decision).toFixed(2)+'</span>':'')+
+              '<span class="ai-time">'+(d.timestamp?fmtTime(d.timestamp):'\u2014')+'</span>'+
+            '</div>'+
+            '<div class="ai-reason">'+(d.reason||'')+'</div>'+
+            (d.rationale?'<div class="ai-rationale">'+d.rationale+'</div>':'');
+          dl.appendChild(li);
+        });
+      } else if(dl){
+        dl.innerHTML='<div class="empty">No AI decisions yet — waiting for buy candidates from other strategies</div>';
+        setText('aiDecisionCount','0');
+      }
+      var lb=document.getElementById('aiLearnings');
+      if(lb&&learningsData){
+        lb.textContent=learningsData.content||'(LEARNINGS.md not yet created — run a daily review or wait until 6 PM CT)';
+      }
+    } else {
+      aiSec.style.display='none';
+    }
+  }
+
   if(risk){
     var drGross=risk.dailyRealizedPnL||0;
     var drNet=risk.dailyRealizedPnLNet!=null?risk.dailyRealizedPnLNet:drGross;
@@ -877,6 +945,13 @@ function wire(){
     cmpBtn.classList.toggle('active',open);
   });
   document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeDrawer();closeStratPopup();}});
+  var aiRevBtn=document.getElementById('aiReviewBtn');
+  if(aiRevBtn)aiRevBtn.onclick=function(){
+    aiRevBtn.disabled=true;aiRevBtn.textContent='Running\u2026';
+    fetch('/ai/review',{method:'POST'}).then(function(){
+      setTimeout(function(){aiRevBtn.disabled=false;aiRevBtn.textContent='Run review now';refresh();},3000);
+    }).catch(function(){aiRevBtn.disabled=false;aiRevBtn.textContent='Run review now';});
+  };
 }
 
 function boot(){wire();loadStrategies().then(function(){refresh();armTimer();});}
@@ -997,6 +1072,26 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     <h2>Recent trades</h2>
     <div id="trades" class="trades"></div>
   </section>
+</div>
+
+<!-- AI Reasoning section (shown only when AI Filter strategy is selected) -->
+<div id="aiSection" style="display:none;margin-top:16px">
+  <div class="grid two">
+    <section class="card accent-ai">
+      <h2 style="display:flex;align-items:center;gap:8px">
+        AI Decisions
+        <span class="count" id="aiDecisionCount">\u2014</span>
+        <button type="button" id="aiReviewBtn" class="ai-refresh-btn">Run review now</button>
+      </h2>
+      <ul id="aiDecisionList" class="ai-decision-list">
+        <div class="empty">No AI decisions yet</div>
+      </ul>
+    </section>
+    <section class="card accent-ai">
+      <h2>Learnings</h2>
+      <div id="aiLearnings" class="ai-learnings-box" style="font-family:inherit;white-space:pre-wrap">Loading\u2026</div>
+    </section>
+  </div>
 </div>
 
 </div><!-- /.main-col -->
