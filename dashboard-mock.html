@@ -331,6 +331,96 @@
   .slot.cooldown .avatar { border-color: var(--amber); }
   .slot.idle .avatar { opacity: 0.55; }
 
+  /* ============== PERSONA AVATAR ANIMATIONS ============== */
+  /* All animations only run when the slot is .active */
+
+  /* STATIC: crosshair scans horizontally inside the visor */
+  @keyframes static-scan {
+    0%, 100% { transform: translateX(-3px); opacity: 0.6; }
+    50%      { transform: translateX(3px);  opacity: 1; }
+  }
+  .slot.persona-static.active .avatar svg line:nth-of-type(1),
+  .slot.persona-static.active .avatar svg line:nth-of-type(2) {
+    transform-origin: 25px 23px;
+    animation: static-scan 2.4s ease-in-out infinite;
+  }
+
+  /* RUSH: spikes shake + eyes pulse */
+  @keyframes rush-shake {
+    0%, 100% { transform: translateY(0); }
+    25%      { transform: translateY(-1px) rotate(-1deg); }
+    75%      { transform: translateY(0.5px) rotate(1deg); }
+  }
+  @keyframes rush-eye-pulse {
+    0%, 100% { stroke-width: 2.2; opacity: 1; }
+    50%      { stroke-width: 3;   opacity: 0.6; }
+  }
+  .slot.persona-rush.active .avatar svg path:first-of-type {
+    transform-origin: 25px 12px;
+    animation: rush-shake 0.6s ease-in-out infinite;
+  }
+  .slot.persona-rush.active .avatar svg path:nth-of-type(3),
+  .slot.persona-rush.active .avatar svg path:nth-of-type(4) {
+    animation: rush-eye-pulse 1.2s ease-in-out infinite;
+  }
+
+  /* STONE: slow eye blink */
+  @keyframes stone-blink {
+    0%, 92%, 100% { transform: scaleY(1); }
+    95%           { transform: scaleY(0.1); }
+  }
+  .slot.persona-stone.active .avatar svg circle:last-of-type {
+    transform-origin: 25px 24px;
+    animation: stone-blink 4s ease-in-out infinite;
+  }
+
+  /* ORACLE: eye scans + light rays pulse */
+  @keyframes oracle-scan {
+    0%, 100% { transform: translateX(-2.5px); }
+    50%      { transform: translateX(2.5px); }
+  }
+  @keyframes oracle-rays {
+    0%, 100% { opacity: 0.4; }
+    50%      { opacity: 1; }
+  }
+  .slot.persona-oracle.active .avatar svg circle {
+    transform-origin: 25px 28px;
+    animation: oracle-scan 3s ease-in-out infinite;
+  }
+  .slot.persona-oracle.active .avatar svg line {
+    animation: oracle-rays 1.6s ease-in-out infinite;
+  }
+
+  /* ============== PERSONA STATS BAR ============== */
+  .slot .stats-mini {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line-soft);
+    font-size: 10px;
+  }
+  .slot .stats-mini .sm-cell { text-align: center; }
+  .slot .stats-mini .sm-cell .v {
+    color: var(--fg); font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+  }
+  .slot .stats-mini .sm-cell .v.pos { color: var(--green); }
+  .slot .stats-mini .sm-cell .v.neg { color: var(--red); }
+  .slot .stats-mini .sm-cell .l {
+    color: var(--muted); font-size: 9px;
+    letter-spacing: 0.06em; margin-top: 1px;
+  }
+  /* In sidebar mode, span stats across full width below name */
+  @media (min-width: 900px) {
+    .col-sidebar .slot { grid-template-columns: 52px 1fr; grid-template-rows: auto auto; }
+    .col-sidebar .slot .avatar { grid-row: 1; grid-column: 1; }
+    .col-sidebar .slot > div:nth-child(2) { grid-row: 1; grid-column: 2; }
+    .col-sidebar .slot .stats-mini { grid-row: 2; grid-column: 1 / -1; margin-top: 8px; }
+  }
+
   /* Cooldown radial */
   .slot .cd-bar {
     position: absolute; bottom: 0; left: 0; height: 2px;
