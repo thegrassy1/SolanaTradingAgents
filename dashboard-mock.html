@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Solana Trader — Multi-Symbol Mock</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --card: #14181d;
+    --border: #1f262e;
+    --fg: #e6e9ee;
+    --muted: #8a939c;
+    --green: #36c976;
+    --red: #ef5760;
+    --amber: #e0a64a;
+    --blue: #5fa8ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
+    color: var(--fg); background: var(--bg);
+    max-width: 720px; margin-inline: auto;
+  }
+  h1 { font-size: 14px; margin: 0 0 6px; color: var(--muted); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; }
+
+  /* Hero P&L */
+  .hero {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 18px 16px; margin-bottom: 14px;
+  }
+  .hero .total { font-size: 32px; font-weight: 600; letter-spacing: -0.01em; }
+  .hero .total.neg { color: var(--red); }
+  .hero .total.pos { color: var(--green); }
+  .hero .sub { color: var(--muted); margin-top: 2px; font-size: 13px; }
+  .hero .meta {
+    display: flex; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--muted);
+    border-top: 1px solid var(--border); padding-top: 10px;
+  }
+  .hero .meta b { color: var(--fg); font-weight: 500; }
+
+  /* Symbol list */
+  .symbols { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .row {
+    display: grid; grid-template-columns: 56px 1fr auto auto;
+    align-items: center; gap: 10px;
+    padding: 13px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
+  }
+  .row:last-child { border-bottom: none; }
+  .row:hover { background: rgba(255,255,255,0.02); }
+  .row .sym { font-weight: 600; }
+  .row .price { color: var(--muted); font-size: 12px; margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .row .change { font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; min-width: 64px; }
+  .row .change.pos { color: var(--green); }
+  .row .change.neg { color: var(--red); }
+  .row .pos-badge {
+    display: inline-block; min-width: 28px; padding: 2px 7px;
+    font-size: 11px; border-radius: 4px;
+    background: rgba(95,168,255,0.12); color: var(--blue);
+    text-align: center;
+  }
+  .row .pos-badge.empty { background: transparent; color: var(--muted); }
+  .row .pos-badge.short { background: rgba(239,87,96,0.13); color: var(--red); }
+  .row .regime {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    margin-right: 8px; vertical-align: middle;
+  }
+  .row .regime.ranging { background: var(--muted); }
+  .row .regime.trending_up { background: var(--green); }
+  .row .regime.trending_down { background: var(--red); }
+  .row .regime.dead { background: #444; }
+
+  .expanded {
+    display: none;
+    padding: 0 14px 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.015);
+  }
+  .row.open + .expanded { display: block; }
+  .expanded h2 { font-size: 11px; color: var(--muted); margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  .kpi-row { display: flex; gap: 16px; margin-bottom: 4px; }
+  .kpi { font-size: 12px; color: var(--muted); }
+  .kpi b { color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .pos-line {
+    display: flex; justify-content: space-between;
+    padding: 6px 0; font-size: 12px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .pos-line:last-child { border-bottom: none; }
+  .pos-line .pnl.pos { color: var(--green); }
+  .pos-line .pnl.neg { color: var(--red); }
+
+  /* Footer toggle */
+  .details-toggle {
+    margin-top: 14px; text-align: center;
+    color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .details {
+    display: none; margin-top: 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+    font-size: 12px; color: var(--muted);
+  }
+  .details.open { display: block; }
+  .details .lbl { color: var(--muted); }
+  .details .val { color: var(--fg); }
+  .details > div { display: flex; justify-content: space-between; padding: 4px 0; }
+
+  /* Tap-target on mobile */
+  @media (max-width: 480px) {
+    body { padding: 10px; }
+    .hero { padding: 14px; }
+    .hero .total { font-size: 26px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Solana Trader</h1>
+
+<div class="hero">
+  <div class="total neg">-$210.36</div>
+  <div class="sub">-2.80% portfolio · paper · ranging market</div>
+  <div class="meta">
+    <span>Open: <b>1</b></span>
+    <span>Closed today: <b>0</b></span>
+    <span>Win rate: <b>76.9%</b></span>
+    <span>Cooldown: <b>—</b></span>
+  </div>
+</div>
+
+<div class="symbols">
+
+  <div class="row" onclick="this.classList.toggle('open')">
+    <div>
+      <span class="regime ranging" title="ranging"></span>
+      <span class="sym">SOL</span>
+    </div>
+    <div class="price">$83.73</div>
+    <div class="change neg">-0.10%</div>
+    <div><span class="pos-badge">1L</span></div>
+  </div>
+  <div class="expanded">
+    <h2>Stats</h2>
+    <div class="kpi-row">
+      <span class="kpi">SMA20 <b>$83.82</b></span>
+      <span class="kpi">Vol <b>0.07%</b></span>
+      <span class="kpi">Regime <b>ranging</b></span>
+    </div>
+    <h2>Positions</h2>
+    <div class="pos-line">
+      <span>buy_and_hold · 11.26 SOL @ $88.78</span>
+      <span class="pnl neg">-$56.84</span>
+    </div>
+    <h2>Strategies</h2>
+    <div class="pos-line"><span>mean_reversion_v1</span><span>idle 7d</span></div>
+    <div class="pos-line"><span>breakout_v1</span><span>idle</span></div>
+    <div class="pos-line"><span>ai_strategy_v1</span><span>idle (rejecting)</span></div>
+  </div>
+
+  <div class="row" onclick="this.classList.toggle('open')">
+    <div>
+      <span class="regime trending_up" title="trending up"></span>
+      <span class="sym">JUP</span>
+    </div>
+    <div class="price">$0.5142</div>
+    <div class="change pos">+2.30%</div>
+    <div><span class="pos-badge empty">—</span></div>
+  </div>
+  <div class="expanded"></div>
+
+  <div class="row" onclick="this.classList.toggle('open')">
+    <div>
+      <span class="regime ranging" title="ranging"></span>
+      <span class="sym">JTO</span>
+    </div>
+    <div class="price">$2.842</div>
+    <div class="change neg">-0.50%</div>
+    <div><span class="pos-badge empty">—</span></div>
+  </div>
+  <div class="expanded"></div>
+
+  <div class="row" onclick="this.classList.toggle('open')">
+    <div>
+      <span class="regime ranging" title="ranging"></span>
+      <span class="sym">BONK</span>
+    </div>
+    <div class="price">$0.0000142</div>
+    <div class="change pos">+0.20%</div>
+    <div><span class="pos-badge empty">—</span></div>
+  </div>
+  <div class="expanded"></div>
+
+  <div class="row" onclick="this.classList.toggle('open')">
+    <div>
+      <span class="regime trending_down" title="trending down"></span>
+      <span class="sym">WIF</span>
+    </div>
+    <div class="price">$1.918</div>
+    <div class="change neg">-1.80%</div>
+    <div><span class="pos-badge short">1S</span></div>
+  </div>
+  <div class="expanded"></div>
+
+</div>
+
+<div class="details-toggle" onclick="document.getElementById('details').classList.toggle('open')">Details ▾</div>
+
+<div class="details" id="details">
+  <div><span class="lbl">Mode</span><span class="val">PAPER</span></div>
+  <div><span class="lbl">Uptime</span><span class="val">14h 23m</span></div>
+  <div><span class="lbl">Daily start NAV</span><span class="val">$5,498.93</span></div>
+  <div><span class="lbl">Realized P&L (today)</span><span class="val">$0.00</span></div>
+  <div><span class="lbl">Risk per trade</span><span class="val">2.0%</span></div>
+  <div><span class="lbl">Last AI action</span><span class="val">auto_tune mean_reversion threshold 1.9 → 1.805</span></div>
+</div>
+
+</body>
+</html>
