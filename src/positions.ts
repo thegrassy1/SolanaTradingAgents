@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { getTokenDecimals } from './tokenInfo';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const OPEN_PATH = path.join(DATA_DIR, 'positions.json');
@@ -267,11 +268,18 @@ export class PositionManager {
     return this.closed.slice(-limit).reverse();
   }
 
-  updateHighWaterMarks(currentPrice: number): void {
+  /**
+   * Update HWM + trailing stops for every open position, using the
+   * appropriate per-mint price. `prices` maps mint → current price (USDC).
+   * Positions whose mint isn't in the map are skipped (no price = no update).
+   */
+  updateHighWaterMarks(prices: Map<string, number>): void {
     let dirty = false;
     for (const p of this.open) {
-      if (currentPrice > p.highWaterMark) {
-        p.highWaterMark = currentPrice;
+      const px = prices.get(p.mint);
+      if (px === undefined) continue;
+      if (px > p.highWaterMark) {
+        p.highWaterMark = px;
         dirty = true;
         if (p.trailingStopPercent !== null && p.trailingStopPercent > 0) {
           const trailStop = p.highWaterMark * (1 - p.trailingStopPercent);
@@ -285,48 +293,53 @@ export class PositionManager {
     if (dirty) this.saveToDisk();
   }
 
-  checkExits(currentPrice: number): ExitSignal[] {
+  /**
+   * Check exits across all positions. Each position is evaluated against
+   * its own mint's price from `prices`. Positions without a price entry
+   * are skipped (no false-trigger from a stale cross-symbol price).
+   */
+  checkExits(prices: Map<string, number>): ExitSignal[] {
     const logChecks = process.env.LOG_EXIT_CHECKS === 'true';
     const out: ExitSignal[] = [];
     for (const p of this.open) {
+      const currentPrice = prices.get(p.mint);
+      if (currentPrice === undefined) continue;
+
       let decision: ExitReason | 'none' = 'none';
       if (p.stopLossPrice !== null && currentPrice <= p.stopLossPrice) {
         const reason: ExitReason =
           p.trailingStopPercent !== null ? 'trailing_stop' : 'stop_loss';
         decision = reason;
-        out.push({
-          positionId: p.id,
-          reason,
-          mint: p.mint,
-          amount: p.amount,
-        });
+        out.push({ positionId: p.id, reason, mint: p.mint, amount: p.amount });
       } else if (
         p.takeProfitPrice !== null &&
         currentPrice >= p.takeProfitPrice
       ) {
         decision = 'take_profit';
-        out.push({
-          positionId: p.id,
-          reason: 'take_profit',
-          mint: p.mint,
-          amount: p.amount,
-        });
+        out.push({ positionId: p.id, reason: 'take_profit', mint: p.mint, amount: p.amount });
       }
       if (logChecks) {
         const sigStr = decision === 'none' ? 'none' : decision;
         console.log(
-          `[EXIT-CHECK] position ${p.id}: currentPrice=${currentPrice} stopLoss=${p.stopLossPrice ?? 'null'} takeProfit=${p.takeProfitPrice ?? 'null'} trailing=${p.trailingStopPercent ?? 'null'} → ${sigStr}`,
+          `[EXIT-CHECK] position ${p.id} (${p.mint.slice(0,4)}): px=${currentPrice} sl=${p.stopLossPrice ?? 'null'} tp=${p.takeProfitPrice ?? 'null'} trail=${p.trailingStopPercent ?? 'null'} → ${sigStr}`,
         );
       }
     }
     return out;
   }
 
-  getUnrealizedPnL(currentPrice: number): number {
+  /**
+   * Sum unrealized PnL across all open positions, in quote currency.
+   * Uses each position's mint decimals (so SOL decimals=9, BONK=5, etc.).
+   */
+  getUnrealizedPnL(prices: Map<string, number>): number {
     let total = 0;
     for (const p of this.open) {
-      const solHuman = Number(p.amount) / 1e9;
-      total += (currentPrice - p.entryPrice) * solHuman;
+      const px = prices.get(p.mint);
+      if (px === undefined) continue;
+      const dec = getTokenDecimals(p.mint);
+      const human = Number(p.amount) / 10 ** dec;
+      total += (px - p.entryPrice) * human;
     }
     return total;
   }
