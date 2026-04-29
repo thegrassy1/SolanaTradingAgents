@@ -79,6 +79,10 @@ export function isRegimeAllowed(stratName: string, regime: MarketRegime): boolea
   switch (stratName) {
     case 'mean_reversion_v1':
       return regime === 'ranging';
+    case 'mean_reversion_short_v1':
+      // Shorts on overheated price work best in ranging; trending_up can
+      // run away from us. Allow ranging only.
+      return regime === 'ranging';
     case 'breakout_v1':
       return regime !== 'dead';
     case 'ai_strategy_v1':

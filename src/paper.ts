@@ -217,6 +217,22 @@ export class PaperTradingEngine {
     return { raw, human: smallestToHuman(mint, raw) };
   }
 
+  /**
+   * Add (or subtract, with negative delta) to a balance directly. Used for
+   * non-swap collateral movements like perp open/close. Persists immediately.
+   */
+  adjustBalance(mint: string, deltaRaw: bigint): void {
+    const current = this.balances[mint] ?? 0n;
+    const next = current + deltaRaw;
+    if (next < 0n) {
+      throw new Error(
+        `adjustBalance would underflow ${mint}: ${current} + ${deltaRaw} = ${next}`,
+      );
+    }
+    this.balances[mint] = next;
+    this.persist();
+  }
+
   getAllBalances(): Record<string, { raw: bigint; human: number }> {
     const out: Record<string, { raw: bigint; human: number }> = {};
     for (const [mint, raw] of Object.entries(this.balances)) {

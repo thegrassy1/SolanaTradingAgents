@@ -193,6 +193,7 @@ export function getDashboardHtml(): string {
   .slot.persona-rush   { --accent: #ff7a3c; }
   .slot.persona-stone  { --accent: #b985ff; }
   .slot.persona-oracle { --accent: #ff00d4; }
+  .slot.persona-void   { --accent: #7d8a9b; }
   .slot .avatar {
     width: 44px; height: 44px; margin: 0 auto 6px;
     border: 1px solid var(--line);
@@ -231,6 +232,12 @@ export function getDashboardHtml(): string {
   @keyframes oracle-rays { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
   .slot.persona-oracle.active .avatar svg circle { transform-origin: 25px 28px; animation: oracle-scan 3s ease-in-out infinite; }
   .slot.persona-oracle.active .avatar svg line { animation: oracle-rays 1.6s ease-in-out infinite; }
+
+  /* VOID: scythe blade swings, hood drifts, eyes glow ominously */
+  @keyframes void-scythe { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
+  @keyframes void-eyes { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+  .slot.persona-void.active .avatar svg path:nth-of-type(2) { transform-origin: 25px 30px; animation: void-scythe 2.6s ease-in-out infinite; }
+  .slot.persona-void.active .avatar svg circle { animation: void-eyes 1.8s ease-in-out infinite; }
 
   /* Persona stats mini-bar */
   .slot .stats-mini { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
@@ -435,6 +442,12 @@ const PERSONAS = {
     title: 'ORACLE — The Seer. Channels Haiku to approve or reject signals.',
     svg: '<svg viewBox="0 0 50 50" fill="none"><path d="M 25 5 L 45 42 L 5 42 Z" stroke="currentColor" stroke-width="2"/><ellipse cx="25" cy="28" rx="11" ry="6" stroke="currentColor" stroke-width="1.5"/><circle cx="25" cy="28" r="3.5" fill="currentColor"/><line x1="25" y1="11" x2="25" y2="16" stroke="currentColor" stroke-width="1.2" opacity="0.7"/><line x1="14" y1="38" x2="17" y2="35" stroke="currentColor" stroke-width="1.2" opacity="0.7"/><line x1="36" y1="38" x2="33" y2="35" stroke="currentColor" stroke-width="1.2" opacity="0.7"/><line x1="25" y1="20" x2="25" y2="22" stroke="currentColor" stroke-width="1" opacity="0.5"/></svg>',
   },
+  mean_reversion_short_v1: {
+    callsign: 'VOID', role: 'REAPER · MR_SHORT', cls: 'persona-void',
+    title: 'VOID — The Reaper. Shorts overheated prices on the perp engine. Reaps when markets revert.',
+    // Hooded reaper silhouette with curved scythe blade
+    svg: '<svg viewBox="0 0 50 50" fill="none"><path d="M 12 36 Q 12 16 25 16 Q 38 16 38 36 L 38 44 L 12 44 Z" stroke="currentColor" stroke-width="2"/><path d="M 6 14 Q 16 4 22 12 L 20 14 Q 14 8 8 16 Z" stroke="currentColor" stroke-width="1.5" fill="currentColor" opacity="0.85"/><circle cx="20" cy="26" r="1.6" fill="currentColor"/><circle cx="30" cy="26" r="1.6" fill="currentColor"/><path d="M 20 32 L 30 32" stroke="currentColor" stroke-width="1" opacity="0.6"/></svg>',
+  },
 };
 
 // Compute rank from total realized P&L
@@ -491,7 +504,7 @@ async function fetchJson(path) {
 
 async function refresh() {
   try {
-    const [status, symbols, strategies, history, decisions, actions, positions, risk] = await Promise.all([
+    const [status, symbols, strategies, history, decisions, actions, positions, perps, risk] = await Promise.all([
       fetchJson('/status'),
       fetchJson('/symbols'),
       fetchJson('/strategies'),
@@ -499,11 +512,12 @@ async function refresh() {
       fetchJson('/ai/decisions?limit=8').catch(() => []),
       fetchJson('/ai/actions?limit=5').catch(() => []),
       fetchJson('/positions'),
+      fetchJson('/perps').catch(() => ({ positions: [] })),
       fetchJson('/risk'),
     ]);
 
     renderScore(status, risk);
-    renderTargets(symbols.symbols, status, positions);
+    renderTargets(symbols.symbols, status, positions, perps);
     await renderLoadout(strategies.strategies, status);
     renderActivity(history, decisions, actions);
     renderDetails(status, risk);
@@ -566,15 +580,20 @@ function computeStreak(recentTrades) {
   return streak;
 }
 
-function renderTargets(symbols, status, positionsRes) {
+function renderTargets(symbols, status, positionsRes, perpsRes) {
   const container = document.getElementById('targets');
   document.getElementById('targetCount').textContent = symbols.length;
 
-  // Map mint → open positions count (long/short)
+  // Map mint → open positions (spot longs)
   const posByMint = {};
   for (const p of (positionsRes.positions || [])) {
     posByMint[p.mint] = posByMint[p.mint] || [];
-    posByMint[p.mint].push(p);
+    posByMint[p.mint].push({ ...p, kind: 'spot' });
+  }
+  // Add perp positions, tagged with direction
+  for (const p of (perpsRes.positions || [])) {
+    posByMint[p.mint] = posByMint[p.mint] || [];
+    posByMint[p.mint].push({ ...p, kind: 'perp' });
   }
 
   const overallRegime = status.regime || 'ranging';
@@ -592,12 +611,28 @@ function renderTargets(symbols, status, positionsRes) {
     const pos = posByMint[s.mint] || [];
     let badge = '<span class="pos-badge empty">—</span>';
     if (pos.length > 0) {
-      const isShort = false; // perps not yet supported
-      badge = '<span class="pos-badge ' + (isShort ? 'short' : 'long') + '">' + pos.length + (isShort ? 'S' : 'L') + '</span>';
+      // If any perp short is open, show 'S'. If both long+short, show split.
+      const longs = pos.filter((p) => p.kind === 'spot' || (p.kind === 'perp' && p.direction === 'long'));
+      const shorts = pos.filter((p) => p.kind === 'perp' && p.direction === 'short');
+      if (longs.length > 0 && shorts.length > 0) {
+        badge = '<span class="pos-badge long">' + longs.length + 'L</span><span class="pos-badge short" style="margin-left:4px">' + shorts.length + 'S</span>';
+      } else if (shorts.length > 0) {
+        badge = '<span class="pos-badge short">' + shorts.length + 'S</span>';
+      } else {
+        badge = '<span class="pos-badge long">' + longs.length + 'L</span>';
+      }
     }
 
     const expandBody = pos.length > 0
       ? pos.map((p) => {
+          if (p.kind === 'perp') {
+            const pnl = p.unrealizedNet ?? 0;
+            const pnlCls = pnl >= 0 ? 'pos' : 'neg';
+            const dirLabel = p.direction === 'short' ? 'SHORT' : 'LONG';
+            const fundingFmt = (p.fundingAccrued ?? 0).toFixed(2);
+            return '<div class="te-row"><span class="l">' + (p.strategy || 'perp') + ' · ' + dirLabel + ' ' + (p.leverage || 1) + 'x @ ' + fmtPrice(p.entryPrice) + ' · funding −$' + fundingFmt + '</span><span class="v ' + pnlCls + '">' + fmtUsd(pnl) + '</span></div>' +
+              '<div class="te-row"><span class="l" style="color:var(--amber)">LIQ ' + fmtPrice(p.liquidationPrice) + ' · equity ' + (p.equityPct ?? 100).toFixed(0) + '%</span><span class="v">collat ' + fmtUsd(p.collateralUsdc) + '</span></div>';
+          }
           const pnl = p.unrealizedPnlNet ?? p.unrealizedPnlQuote ?? 0;
           const pnlCls = pnl >= 0 ? 'pos' : 'neg';
           return '<div class="te-row"><span class="l">' + (p.strategy || 'pos') + ' @ ' + fmtPrice(p.entryPrice) + '</span><span class="v ' + pnlCls + '">' + fmtUsd(pnl) + '</span></div>';
