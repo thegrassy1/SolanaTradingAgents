@@ -32,11 +32,34 @@
       radial-gradient(ellipse at top, #0d1730 0%, var(--bg-0) 70%) fixed,
       var(--bg-0);
     min-height: 100vh;
-    padding: 12px;
-    max-width: 760px;
-    margin: 0 auto;
+    padding: 16px 20px;
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* Top row: score panel takes priority on wide screens */
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  /* Two-column layout on tablet+ */
+  @media (min-width: 900px) {
+    .layout {
+      grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+      gap: 18px;
+    }
+    .col-left, .col-right { display: flex; flex-direction: column; gap: 8px; }
+    .col-left .hdr, .col-right .hdr { margin: 6px 0 4px; }
+    /* Score spans both columns at the top */
+    .score-panel { grid-column: 1 / -1; }
+  }
+  /* Three-column on desktop */
+  @media (min-width: 1400px) {
+    .layout {
+      grid-template-columns: minmax(420px, 1fr) minmax(500px, 1.2fr) minmax(420px, 1fr);
+    }
+    .score-panel { grid-column: 1 / -1; }
   }
 
   /* Subtle scanline overlay for that CRT feel */
@@ -342,7 +365,9 @@
 <!-- Notification slot -->
 <div class="notif" id="notif">▲ POSITION OPENED · SOL +0.5%</div>
 
-<!-- ===================== SCORE ===================== -->
+<div class="layout">
+
+<!-- ===================== SCORE (spans full width) ===================== -->
 <div class="hud score-panel">
   <span class="corner-tl"></span><span class="corner-bl"></span>
   <div class="rank-row">
@@ -372,7 +397,8 @@
   </div>
 </div>
 
-<!-- ===================== TARGETS ===================== -->
+<!-- ===================== LEFT COLUMN: TARGETS ===================== -->
+<div class="col-left">
 <div class="hdr">Targets · 5 tracked</div>
 <div class="hud" style="padding: 0;">
   <span class="corner-tl"></span><span class="corner-bl"></span>
@@ -442,6 +468,10 @@
   </div>
 </div>
 
+</div><!-- /col-left -->
+
+<!-- ===================== RIGHT COLUMN: LOADOUT + LOG + DETAILS ===================== -->
+<div class="col-right">
 <!-- ===================== LOADOUT ===================== -->
 <div class="hdr">Loadout · Strategies</div>
 <div class="hud" style="padding: 0;">
@@ -518,6 +548,9 @@
   <div class="dp-row"><span class="l">MAX OPEN</span><span class="v">1</span></div>
   <div class="dp-row"><span class="l">REGIME</span><span class="v">RANGING (vol 0.07%)</span></div>
 </div>
+
+</div><!-- /col-right -->
+</div><!-- /layout -->
 
 <script>
   // ======================================================================
