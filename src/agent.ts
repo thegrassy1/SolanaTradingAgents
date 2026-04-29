@@ -14,6 +14,7 @@ import { PaperTradingEngine } from './paper';
 import { PositionManager } from './positions';
 import { calculatePrice, getQuote, PriceMonitor } from './price';
 import { MultiSymbolMonitor } from './multiPrice';
+import { getActiveUniverse, getSymbolByMint } from './symbols';
 import { RiskManager, type TradeOutcome } from './risk';
 import { registry } from './strategies/registry';
 import { swap } from './swap';
@@ -521,8 +522,10 @@ export class TradingAgent {
         .find((p) => p.id === sig.positionId);
       if (!pos) continue;
       const portfolio = this.getPortfolioForStrategy(pos.strategy);
+      // Exit leg: sell the position's actual mint back to USDC
+      // (was hardcoded SOL — would catastrophically misroute multi-symbol exits)
       const rec = await this.executeSwapLeg(
-        SOL,
+        pos.mint,
         USDC,
         sig.amount,
         currentPrice,
@@ -546,7 +549,8 @@ export class TradingAgent {
       this.strategyDailyPnL.set(pos.strategy, (this.strategyDailyPnL.get(pos.strategy) ?? 0) + grossPnl);
       this.strategyDailyPnLNet.set(pos.strategy, (this.strategyDailyPnLNet.get(pos.strategy) ?? 0) + netPnl);
       const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
-      this.armStrategyCooldown(pos.strategy, netForOutcome >= 0 ? 'win' : 'loss');
+      // Per (strategy, mint) cooldown so a loss in BONK doesn't delay JUP entries
+      this.armStrategyCooldown(`${pos.strategy}:${pos.mint}`, netForOutcome >= 0 ? 'win' : 'loss');
       logTrade({
         timestamp: rec.timestamp,
         inputMint: rec.inputMint,
@@ -581,9 +585,28 @@ export class TradingAgent {
   // ----- Strategy entries -----
 
   /** Generic buy entry for any signal-based strategy. */
-  private async executeStrategyBuy(stratName: string, priceSolUsdc: number): Promise<void> {
+  /**
+   * Open a position in `targetMint` for `stratName` at `entryPrice` (USDC).
+   *
+   * Risk gates evaluated in order:
+   *   1. Per-strategy max-open + daily-loss circuit breaker (RiskManager)
+   *   2. Portfolio gross-exposure cap (P3): sum of open position USDC
+   *      values across all strategies must stay under PORTFOLIO_GROSS_CAP_PCT
+   *      of the strategy's NAV.
+   *   3. Sector cap (P3): no two open positions in the same sector across
+   *      all strategies (correlations matter — meme tokens move together).
+   */
+  private async executeStrategyBuy(
+    stratName: string,
+    targetMint: string,
+    entryPrice: number,
+  ): Promise<void> {
     const portfolio = this.getPortfolioForStrategy(stratName);
+    const targetSym = getSymbolByMint(targetMint);
+    const targetLabel = targetSym?.symbol ?? targetMint.slice(0, 4);
+
     try {
+      // ---- Gate 1: existing per-strategy + daily-loss
       const openCount = this.positionManager.getOpenPositions().length;
       const gate = this.riskManager.canOpenPosition(
         openCount,
@@ -591,10 +614,28 @@ export class TradingAgent {
         this.strategyDailyStartValue.get(stratName) ?? this.dailyStartingValueQuote,
       );
       if (!gate.allowed) {
-        console.log(`[AGENT][${stratName}] Entry blocked: ${gate.reason ?? 'risk'}`);
+        console.log(`[AGENT][${stratName}][${targetLabel}] Entry blocked: ${gate.reason ?? 'risk'}`);
         return;
       }
-      const entryPrice = priceSolUsdc;
+
+      // ---- Gate 2 (P3): sector cap
+      // Reject if there's already an open position in the same sector
+      // (across ALL strategies). Meme tokens correlate, defi tokens correlate.
+      if (targetSym) {
+        const openPositions = this.positionManager.getOpenPositions();
+        const conflictingSector = openPositions.find((p) => {
+          const otherSym = getSymbolByMint(p.mint);
+          return otherSym?.sector === targetSym.sector && p.mint !== targetMint;
+        });
+        if (conflictingSector) {
+          const otherLabel = getSymbolByMint(conflictingSector.mint)?.symbol ?? '?';
+          console.log(
+            `[AGENT][${stratName}][${targetLabel}] Entry blocked: sector_cap (${targetSym.sector}) — already long ${otherLabel}`,
+          );
+          return;
+        }
+      }
+
       const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
       const { totalValue: nav } = await portfolio.getPortfolioValue(this.cfg.quoteMint);
       const riskMultiplier = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
@@ -604,32 +645,55 @@ export class TradingAgent {
         stopLossPrice,
         riskMultiplier,
       );
-      const maxUsdcRaw =
-        this.mode === 'paper' ? portfolio.getBalance(USDC).raw : this.liveVirtualUsdc;
+
+      // ---- Gate 3 (P3): gross-exposure cap (max 30% NAV deployed across all
+      // open positions in this portfolio). USDC value = Σ(amount × entry).
+      const PORTFOLIO_GROSS_CAP_PCT = 0.30;
+      const stratOpen = this.positionManager.getOpenPositions().filter(
+        (p) => p.strategy === stratName,
+      );
+      const grossDeployed = stratOpen.reduce((s, p) => s + (p.entryQuoteAmount ?? 0), 0);
+      const remainingCapacity = Math.max(
+        0,
+        nav * PORTFOLIO_GROSS_CAP_PCT - grossDeployed,
+      );
+      const usdcMicroFromCap = BigInt(Math.floor(remainingCapacity * 1e6));
+
+      const maxUsdcRaw = this.mode === 'paper'
+        ? portfolio.getBalance(USDC).raw
+        : this.liveVirtualUsdc;
+
       let usdcSpend = Number(usdcMicroSpend > 0n ? usdcMicroSpend : 0n);
-      const fallback = Math.floor((this.tradeAmountLamports / 1e9) * priceSolUsdc * 1e6);
+      // Fallback when calculatePositionSize underflows (e.g. zero entry/sl gap)
+      const fallback = Math.floor((this.tradeAmountLamports / 1e9) * entryPrice * 1e6);
       if (usdcSpend < 10_000) usdcSpend = Math.min(Number(maxUsdcRaw), fallback);
-      usdcSpend = Math.min(usdcSpend, Number(maxUsdcRaw));
+
+      // Clamp to: balance available, gross-exposure cap, otherwise no buy
+      usdcSpend = Math.min(usdcSpend, Number(maxUsdcRaw), Number(usdcMicroFromCap));
       if (usdcSpend < 10_000) {
-        console.log(`[AGENT][${stratName}] Buy skipped: USDC spend too small`);
+        const reason = remainingCapacity < 0.01
+          ? 'gross_exposure_cap_reached'
+          : 'usdc_spend_too_small';
+        console.log(`[AGENT][${stratName}][${targetLabel}] Buy skipped: ${reason}`);
         return;
       }
+
       const amountUsdc = BigInt(usdcSpend);
       const rec = await this.executeSwapLeg(
         USDC,
-        SOL,
+        targetMint,
         amountUsdc,
-        priceSolUsdc,
+        entryPrice,
         stratName,
         { portfolio },
       );
       if (rec.status === 'paper_filled' || rec.status === 'success') {
-        const solOut = BigInt(rec.outputAmount);
+        const tokenOut = BigInt(rec.outputAmount);
         const entryQuoteAmount = rawToHumanAmount(USDC, rec.inputAmount);
         const entryFeesQuote = rec.solFeeQuote ?? 0;
         this.positionManager.openPosition(
-          SOL,
-          solOut,
+          targetMint,
+          tokenOut,
           entryPrice,
           this.mode,
           stratName,
@@ -638,15 +702,16 @@ export class TradingAgent {
           this.riskManager.trailingStopPercent,
           { entryQuoteAmount, entryFeesQuote },
         );
-        this.armStrategyCooldown(stratName, null);
+        // Per (strategy, mint) cooldown
+        this.armStrategyCooldown(`${stratName}:${targetMint}`, null);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[AGENT][${stratName}] executeStrategyBuy failed:`, msg);
+      console.error(`[AGENT][${stratName}][${targetLabel}] executeStrategyBuy failed:`, msg);
       logTrade({
         timestamp: new Date().toISOString(),
         inputMint: USDC,
-        outputMint: SOL,
+        outputMint: targetMint,
         inputAmount: '0',
         outputAmount: '0',
         txSignature: 'n/a',
@@ -654,7 +719,7 @@ export class TradingAgent {
         mode: this.mode,
         strategy: stratName,
         errorMessage: msg,
-        priceAtTrade: priceSolUsdc,
+        priceAtTrade: entryPrice,
       });
     }
   }
@@ -904,17 +969,16 @@ export class TradingAgent {
       return;
     }
 
-    const price = this.priceMonitor.getLatestPrice();
-    const sma = this.priceMonitor.getMovingAverage(20);
-    const vol = this.priceMonitor.getVolatility(20);
-    if (price === null || sma === null) return;
+    // Build per-symbol price snapshot for exits + HWM updates
+    const priceMap = this.getCurrentPriceMap();
+    const universe = getActiveUniverse();
 
-    this.positionManager.updateHighWaterMarks(price);
+    this.positionManager.updateHighWaterMarks(priceMap);
 
-    // Process risk exits for ALL open positions (across all strategies),
+    // Process risk exits for ALL open positions (per-symbol prices),
     // excluding buy_and_hold positions which have no SL/TP.
     const allExits = this.positionManager
-      .checkExits(price)
+      .checkExits(priceMap)
       .filter((sig) => {
         const pos = this.positionManager
           .getOpenPositions()
@@ -922,115 +986,158 @@ export class TradingAgent {
         return pos?.strategy !== 'buy_and_hold_v1';
       });
     if (allExits.length > 0) {
-      await this.processRiskExitSignals(allExits, price);
+      // Group exits by mint and process with the right price for each
+      const byMint = new Map<string, typeof allExits>();
+      for (const sig of allExits) {
+        const arr = byMint.get(sig.mint) ?? [];
+        arr.push(sig);
+        byMint.set(sig.mint, arr);
+      }
+      for (const [mint, sigs] of byMint) {
+        const px = priceMap.get(mint);
+        if (px === undefined) continue;
+        await this.processRiskExitSignals(sigs, px);
+      }
     }
 
-    // Classify market regime once per tick
-    const maxLookback = Math.max(...ALL_STRATEGY_NAMES.map((n) => {
-      const cfg = registry.getConfig(n);
+    // Classify overall market regime using SOL as the macro indicator
+    const solSma = this.priceMonitor.getMovingAverage(20);
+    const solVol = this.priceMonitor.getVolatility(20);
+    const maxLookback = Math.max(...ALL_STRATEGY_NAMES.map((sn) => {
+      const cfg = registry.getConfig(sn);
       return (cfg.lookbackBars ?? 20) + 1;
     }));
-    const priceHistory = this.priceMonitor.getPriceHistory(Math.max(maxLookback, 21));
-    const regimeResult = classifyRegime(priceHistory, vol);
+    const solHistory = this.priceMonitor.getPriceHistory(Math.max(maxLookback, 21));
+    const regimeResult = classifyRegime(solHistory, solVol);
     this.currentRegime = regimeResult.regime;
     this.currentRegimeResult = regimeResult;
 
     const enabledStrategies = this.cfg.strategies;
-    const deviationPct = sma !== 0 ? ((price - sma) / sma) * 100 : 0;
-    const volPct = (vol ?? 0) * 100;
 
-    // First pass: run non-AI, non-buy-and-hold strategies; collect candidate signals
+    // First pass: run signal strategies (mean_rev, breakout) per-symbol;
+    // collect candidate signals for AI strategy. Buy & Hold handled separately.
     const candidateSignals: import('./strategies/base').CandidateSignal[] = [];
 
-    for (const stratName of enabledStrategies) {
-      if (stratName === 'ai_strategy_v1' || stratName === 'buy_and_hold_v1') continue;
-      const strategy = registry.getStrategyByName(stratName);
-      if (!strategy) continue;
+    for (const sym of universe) {
+      const monitor = this.multiMonitor.get(sym.mint);
+      if (!monitor || monitor.getSampleCount() < 10) continue;
 
-      const openPos =
-        this.positionManager.getOpenPositions().find((p) => p.strategy === stratName) ?? null;
+      const symPrice = monitor.getLatestPrice();
+      const symSma = monitor.getMovingAverage(20);
+      const symVol = monitor.getVolatility(20);
+      const symHistory = monitor.getPriceHistory(Math.max(maxLookback, 21));
+      if (symPrice === null || symSma === null) continue;
 
-      if (openPos) {
-        this.logPositionHoldIfDue(price, stratName);
-        continue;
-      }
+      // Per-symbol regime classification
+      const symRegime = classifyRegime(symHistory, symVol).regime;
 
-      // Regime gate — skip evaluation if market conditions don't suit this strategy
-      if (!isRegimeAllowed(stratName, this.currentRegime)) {
-        console.log(
-          `[AGENT][${stratName}] Regime gate: ${this.currentRegime} — skipping entry evaluation`,
-        );
-        continue;
-      }
+      for (const stratName of enabledStrategies) {
+        if (stratName === 'ai_strategy_v1' || stratName === 'buy_and_hold_v1') continue;
+        const strategy = registry.getStrategyByName(stratName);
+        if (!strategy) continue;
 
-      const now = Date.now();
-      const cooldownUntil = this.strategyCooldowns.get(stratName) ?? 0;
-      if (now < cooldownUntil) {
-        const sec = Math.ceil((cooldownUntil - now) / 1000);
-        console.log(`[AGENT][${stratName}] Cooling down (entries), ${sec}s remaining`);
-        continue;
-      }
+        // Per (strategy, mint) open-position lookup
+        const openPos = this.positionManager.getOpenPositions()
+          .find((p) => p.strategy === stratName && p.mint === sym.mint) ?? null;
 
-      const signal = await Promise.resolve(strategy.evaluate({
-        currentPrice: price,
-        sma,
-        volatility: vol,
-        openPosition: null,
-        config: registry.getConfig(stratName),
-        priceHistory,
-      }));
+        if (openPos) {
+          this.logPositionHoldIfDue(symPrice, `${stratName}:${sym.symbol}`);
+          continue;
+        }
 
-      console.log(
-        `[AGENT][${stratName}] price=${price.toFixed(4)} sma=${sma.toFixed(4)} dev=${deviationPct.toFixed(2)}% vol=${volPct.toFixed(2)}% regime=${this.currentRegime} signal=${signal.action}`,
-      );
+        // Regime gate — based on this symbol's regime
+        if (!isRegimeAllowed(stratName, symRegime)) {
+          continue;
+        }
 
-      candidateSignals.push({ strategyName: stratName, signal });
+        // Per (strategy, mint) cooldown
+        const cdKey = `${stratName}:${sym.mint}`;
+        const now = Date.now();
+        const cooldownUntil = this.strategyCooldowns.get(cdKey) ?? 0;
+        if (now < cooldownUntil) continue;
 
-      if (signal.action === 'buy') {
-        await this.executeStrategyBuy(stratName, price);
+        const signal = await Promise.resolve(strategy.evaluate({
+          currentPrice: symPrice,
+          sma: symSma,
+          volatility: symVol,
+          openPosition: null,
+          config: registry.getConfig(stratName),
+          priceHistory: symHistory,
+        }));
+
+        const dev = symSma !== 0 ? ((symPrice - symSma) / symSma) * 100 : 0;
+        if (signal.action !== 'hold') {
+          console.log(
+            `[AGENT][${stratName}][${sym.symbol}] px=${symPrice.toFixed(4)} dev=${dev.toFixed(2)}% vol=${(symVol * 100).toFixed(2)}% regime=${symRegime} → ${signal.action} (${signal.reason})`,
+          );
+        }
+
+        // AI sees candidates with which symbol they came from
+        candidateSignals.push({
+          strategyName: stratName,
+          signal: { ...signal, metadata: { ...signal.metadata, mint: sym.mint, symbol: sym.symbol } },
+        });
+
+        if (signal.action === 'buy') {
+          await this.executeStrategyBuy(stratName, sym.mint, symPrice);
+        }
       }
     }
 
-    // Handle Buy & Hold
-    if (enabledStrategies.includes('buy_and_hold_v1')) {
-      await this.handleBuyAndHold(price);
+    // Handle Buy & Hold (still SOL-only — that's its whole job)
+    const solPrice = priceMap.get(this.cfg.baseMint);
+    if (enabledStrategies.includes('buy_and_hold_v1') && solPrice !== undefined) {
+      await this.handleBuyAndHold(solPrice);
     }
 
-    // Second pass: AI strategy — receives candidate signals + regime context
-    if (enabledStrategies.includes('ai_strategy_v1')) {
+    // Second pass: AI strategy filters approved candidate-symbol pairs
+    if (enabledStrategies.includes('ai_strategy_v1') && solPrice !== undefined) {
       const aiStrategy = registry.getStrategyByName('ai_strategy_v1');
-      if (aiStrategy) {
-        const aiOpenPos =
-          this.positionManager.getOpenPositions().find((p) => p.strategy === 'ai_strategy_v1') ?? null;
+      if (aiStrategy && candidateSignals.some((c) => c.signal.action === 'buy')) {
+        // For each unique candidate (strategy, symbol) buy, run AI
+        const buyCands = candidateSignals.filter((c) => c.signal.action === 'buy');
+        for (const cand of buyCands) {
+          const meta = cand.signal.metadata as { mint?: string; symbol?: string } | undefined;
+          const candMint = meta?.mint;
+          if (!candMint) continue;
 
-        if (aiOpenPos) {
-          this.logPositionHoldIfDue(price, 'ai_strategy_v1');
-        } else if (!isRegimeAllowed('ai_strategy_v1', this.currentRegime)) {
-          console.log(`[AGENT][ai_strategy_v1] Regime gate: ${this.currentRegime} — skipping`);
-        } else {
-          const nowAi = Date.now();
-          const aiCooldownUntil = this.strategyCooldowns.get('ai_strategy_v1') ?? 0;
-          if (nowAi < aiCooldownUntil) {
-            const sec = Math.ceil((aiCooldownUntil - nowAi) / 1000);
-            console.log(`[AGENT][ai_strategy_v1] Cooling down (entries), ${sec}s remaining`);
-          } else {
-            const aiSignal = await Promise.resolve(aiStrategy.evaluate({
-              currentPrice: price,
-              sma,
-              volatility: vol,
-              openPosition: null,
-              config: registry.getConfig('ai_strategy_v1'),
-              priceHistory,
-              candidateSignals,
-            }));
+          // Skip if AI strategy already has a position in this symbol
+          const aiOpen = this.positionManager.getOpenPositions()
+            .find((p) => p.strategy === 'ai_strategy_v1' && p.mint === candMint);
+          if (aiOpen) continue;
 
-            console.log(
-              `[AGENT][ai_strategy_v1] price=${price.toFixed(4)} dev=${deviationPct.toFixed(2)}% regime=${this.currentRegime} signal=${aiSignal.action} reason="${aiSignal.reason}"`,
-            );
+          const aiSym = universe.find((s) => s.mint === candMint);
+          if (!aiSym) continue;
+          const aiMonitor = this.multiMonitor.get(candMint);
+          if (!aiMonitor) continue;
+          const aiPx = aiMonitor.getLatestPrice();
+          const aiSma = aiMonitor.getMovingAverage(20);
+          const aiVol = aiMonitor.getVolatility(20);
+          if (aiPx === null) continue;
 
-            if (aiSignal.action === 'buy') {
-              await this.executeStrategyBuy('ai_strategy_v1', price);
-            }
+          // Per (ai_strategy_v1, mint) cooldown
+          const cdKey = `ai_strategy_v1:${candMint}`;
+          const aiCooldownUntil = this.strategyCooldowns.get(cdKey) ?? 0;
+          if (Date.now() < aiCooldownUntil) continue;
+
+          if (!isRegimeAllowed('ai_strategy_v1', this.currentRegime)) continue;
+
+          const aiSignal = await Promise.resolve(aiStrategy.evaluate({
+            currentPrice: aiPx,
+            sma: aiSma,
+            volatility: aiVol,
+            openPosition: null,
+            config: registry.getConfig('ai_strategy_v1'),
+            priceHistory: aiMonitor.getPriceHistory(Math.max(maxLookback, 21)),
+            candidateSignals: [cand],
+          }));
+
+          console.log(
+            `[AGENT][ai_strategy_v1][${aiSym.symbol}] candidate=${cand.strategyName} signal=${aiSignal.action} reason="${aiSignal.reason}"`,
+          );
+
+          if (aiSignal.action === 'buy') {
+            await this.executeStrategyBuy('ai_strategy_v1', candMint, aiPx);
           }
         }
       }
@@ -1247,14 +1354,22 @@ export class TradingAgent {
     await this.ensureDailyNav();
     const pos = this.positionManager.getOpenPositions().find((p) => p.id === positionId);
     if (!pos) throw new Error(`Position not found: ${positionId}`);
-    if (pos.mint !== SOL) {
-      throw new Error(
-        `closePositionById only supports SOL positions in v1 (got ${pos.mint})`,
-      );
-    }
     const portfolio = this.getPortfolioForStrategy(pos.strategy);
-    const priceSolUsdc = await this.resolvePriceSolUsdc();
-    const rec = await this.executeSwapLeg(SOL, USDC, pos.amount, priceSolUsdc, `close_${reason}`, {
+
+    // Resolve current price for the position's actual mint
+    let exitPrice: number;
+    if (pos.mint === SOL) {
+      exitPrice = await this.resolvePriceSolUsdc();
+    } else {
+      const monitor = this.multiMonitor.get(pos.mint);
+      const px = monitor?.getLatestPrice();
+      if (px === null || px === undefined) {
+        throw new Error(`No live price for mint ${pos.mint} — cannot close`);
+      }
+      exitPrice = px;
+    }
+
+    const rec = await this.executeSwapLeg(pos.mint, USDC, pos.amount, exitPrice, `close_${reason}`, {
       skipLog: true,
       portfolio,
     });
@@ -1264,7 +1379,7 @@ export class TradingAgent {
     }
     const exitQuoteAmount = rawToHumanAmount(USDC, rec.outputAmount);
     const exitFeesQuote = rec.solFeeQuote ?? 0;
-    const closed = this.positionManager.closePosition(positionId, priceSolUsdc, reason, {
+    const closed = this.positionManager.closePosition(positionId, exitPrice, reason, {
       exitQuoteAmount,
       exitFeesQuote,
     });
@@ -1275,7 +1390,8 @@ export class TradingAgent {
     this.strategyDailyPnL.set(pos.strategy, (this.strategyDailyPnL.get(pos.strategy) ?? 0) + grossPnlC);
     this.strategyDailyPnLNet.set(pos.strategy, (this.strategyDailyPnLNet.get(pos.strategy) ?? 0) + netPnlC);
     const netForOutcome = closed.realizedPnlNet ?? closed.realizedPnlQuote;
-    this.armStrategyCooldown(pos.strategy, netForOutcome >= 0 ? 'win' : 'loss');
+    // Per (strategy, mint) cooldown
+    this.armStrategyCooldown(`${pos.strategy}:${pos.mint}`, netForOutcome >= 0 ? 'win' : 'loss');
     const merged: TradeRecord = {
       timestamp: rec.timestamp,
       inputMint: rec.inputMint,
@@ -1289,9 +1405,9 @@ export class TradingAgent {
       mode: rec.mode,
       strategy: `close_${reason}`,
       slippageBps: rec.slippageBps,
-      priceAtTrade: priceSolUsdc,
+      priceAtTrade: exitPrice,
       entryPrice: pos.entryPrice,
-      exitPrice: priceSolUsdc,
+      exitPrice: exitPrice,
       exitReason: reason,
       realizedPnl: closed.realizedPnlQuote,
       realizedPnlGross: closed.realizedPnlGross ?? closed.realizedPnlQuote,
@@ -1430,27 +1546,48 @@ export class TradingAgent {
     return out;
   }
 
+  /**
+   * Build a Map<mint, currentPrice> snapshot from the multi-symbol monitor
+   * and the legacy SOL priceMonitor. Used for position checks, PnL, exits.
+   */
+  getCurrentPriceMap(): Map<string, number> {
+    const out = new Map<string, number>();
+    const solPx = this.priceMonitor.getLatestPrice();
+    if (solPx !== null) out.set(this.cfg.baseMint, solPx);
+    for (const snap of this.multiMonitor.snapshotAll()) {
+      if (snap.price !== null) out.set(snap.mint, snap.price);
+    }
+    return out;
+  }
+
   getPositionsApi(currentPrice: number | null): {
     positions: Array<Record<string, unknown> & { unrealizedPnlQuote: number }>;
     unrealizedPnLTotal: number;
     unrealizedPnLTotalNet: number;
   } {
     const px = currentPrice ?? this.priceMonitor.getLatestPrice() ?? 0;
+    const priceMap = this.getCurrentPriceMap();
     const feeLamports =
       (this.cfg.paperNetworkFeeLamports + this.cfg.paperPriorityFeeLamports) | 0;
     const solFeeQuoteEst = px > 0 ? (feeLamports / 1e9) * px : 0;
     const takerBps = Math.max(0, this.cfg.paperTakerFeeBps | 0);
     let totalNet = 0;
     const positions = this.positionManager.getOpenPositions().map((p) => {
-      const solHuman = Number(p.amount) / 1e9;
-      const unrealizedGross = p.mint === SOL ? (px - p.entryPrice) * solHuman : 0;
+      const positionPrice = priceMap.get(p.mint) ?? 0;
+      const decimals = getTokenDecimals(p.mint);
+      const tokenHuman = Number(p.amount) / 10 ** decimals;
+      const unrealizedGross = positionPrice > 0
+        ? (positionPrice - p.entryPrice) * tokenHuman
+        : 0;
       let unrealizedNet = unrealizedGross;
-      if (p.mint === SOL && p.entryQuoteAmount != null && px > 0) {
-        const grossExitUsdc = solHuman * px;
+      if (p.entryQuoteAmount != null && positionPrice > 0) {
+        const grossExitUsdc = tokenHuman * positionPrice;
         const takerHaircut = grossExitUsdc * (takerBps / 10_000);
         const estExitUsdc = grossExitUsdc - takerHaircut;
         const entryFees = p.entryFeesQuote ?? 0;
-        unrealizedNet = estExitUsdc - p.entryQuoteAmount - entryFees - solFeeQuoteEst;
+        // SOL gas fee is only meaningful when the swap leg uses SOL
+        const gasEst = p.mint === this.cfg.baseMint ? solFeeQuoteEst : 0;
+        unrealizedNet = estExitUsdc - p.entryQuoteAmount - entryFees - gasEst;
       }
       totalNet += unrealizedNet;
       return {
@@ -1472,7 +1609,7 @@ export class TradingAgent {
         unrealizedPnlNet: unrealizedNet,
       };
     });
-    const unrealizedPnLTotal = px > 0 ? this.positionManager.getUnrealizedPnL(px) : 0;
+    const unrealizedPnLTotal = this.positionManager.getUnrealizedPnL(priceMap);
     return { positions, unrealizedPnLTotal, unrealizedPnLTotalNet: totalNet };
   }
 
