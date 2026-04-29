@@ -132,6 +132,12 @@ async function handleRequest(
       return;
     }
 
+    if (method === 'GET' && pathname === '/symbols') {
+      // Multi-symbol snapshot — current price/SMA/vol for each universe symbol.
+      done(200, { symbols: agent.multiMonitor.snapshotAll() });
+      return;
+    }
+
     if (method === 'GET' && pathname === '/prices/recent') {
       const limitRaw = url.searchParams.get('limit') ?? '50';
       const limit = Math.min(

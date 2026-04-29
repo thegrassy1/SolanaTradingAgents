@@ -13,6 +13,7 @@ import {
 import { PaperTradingEngine } from './paper';
 import { PositionManager } from './positions';
 import { calculatePrice, getQuote, PriceMonitor } from './price';
+import { MultiSymbolMonitor } from './multiPrice';
 import { RiskManager, type TradeOutcome } from './risk';
 import { registry } from './strategies/registry';
 import { swap } from './swap';
@@ -49,6 +50,10 @@ const ALL_STRATEGY_NAMES = ['mean_reversion_v1', 'breakout_v1', 'buy_and_hold_v1
 export class TradingAgent {
   private readonly cfg: AppConfig;
   readonly priceMonitor: PriceMonitor;
+  /** Multi-symbol price monitor — collects history for the full universe.
+   *  In P1 it runs alongside priceMonitor for data collection only.
+   *  In P2 strategies will read from this directly. */
+  readonly multiMonitor: MultiSymbolMonitor;
   readonly positionManager: PositionManager;
   readonly riskManager: RiskManager;
   private running = false;
@@ -116,6 +121,7 @@ export class TradingAgent {
       cfg.tradeAmountLamports,
       cfg.pollIntervalMs,
     );
+    this.multiMonitor = new MultiSymbolMonitor(cfg.pollIntervalMs);
     this.positionManager = new PositionManager();
     this.riskManager = new RiskManager(cfg);
     this.loadPersistedRuntimeKeys();
@@ -257,7 +263,17 @@ export class TradingAgent {
       logPrice(this.cfg.baseMint, this.cfg.quoteMint, price, sma20, vol);
       void this.evaluate();
     };
+    // Multi-symbol price collection — logs every universe symbol's tick to DB.
+    // Strategy execution still uses this.priceMonitor (SOL only) until P2.
+    this.multiMonitor.onPriceUpdate = (mint, price, sma20) => {
+      // Skip SOL — it's already logged by priceMonitor above (same data, avoid dupes)
+      if (mint === this.cfg.baseMint) return;
+      const m = this.multiMonitor.get(mint);
+      const vol = m ? m.getVolatility(20) : 0;
+      logPrice(mint, this.cfg.quoteMint, price, sma20, vol);
+    };
     this.priceMonitor.start();
+    this.multiMonitor.start();
     console.log(`[AGENT] Agent started in ${this.mode.toUpperCase()} mode`);
   }
 
@@ -268,6 +284,7 @@ export class TradingAgent {
     }
     this.running = false;
     this.priceMonitor.stop();
+    this.multiMonitor.stop();
     const summary = getTradeSummary();
     console.log('[AGENT] Trade summary:', JSON.stringify(summary));
     for (const [name, engine] of this.portfolios) {
