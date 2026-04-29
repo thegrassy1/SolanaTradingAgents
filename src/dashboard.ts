@@ -252,10 +252,26 @@ export function getDashboardHtml(): string {
   .log { max-height: 320px; overflow-y: auto; font-size: 13px; padding: 0; }
   .log::-webkit-scrollbar { width: 4px; }
   .log::-webkit-scrollbar-thumb { background: var(--line); }
-  .log-entry { display: grid; grid-template-columns: 70px 78px 1fr; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); align-items: baseline; }
+  .log-entry { display: grid; grid-template-columns: 26px 64px 70px 1fr; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); align-items: center; }
   .log-entry:last-child { border-bottom: none; }
   .log-entry .t { color: var(--muted); font-size: 11px; }
   .log-entry .tag { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; padding: 2px 6px; text-align: center; border: 1px solid; }
+
+  /* Mini avatar in activity feed */
+  .log-avatar {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line);
+    color: var(--cyan-dim);
+    background: rgba(0,0,0,0.25);
+  }
+  .log-avatar svg { width: 100%; height: 100%; display: block; }
+  .log-avatar.persona-static  { color: #00e5ff; border-color: rgba(0,229,255,0.4); }
+  .log-avatar.persona-rush    { color: #ff7a3c; border-color: rgba(255,122,60,0.4); }
+  .log-avatar.persona-stone   { color: #b985ff; border-color: rgba(185,133,255,0.4); }
+  .log-avatar.persona-oracle  { color: #ff00d4; border-color: rgba(255,0,212,0.4); }
+  .log-avatar.persona-void    { color: #7d8a9b; border-color: rgba(125,138,155,0.4); }
+  .log-avatar.system { color: var(--muted); opacity: 0.5; }
   .tag.open { color: var(--cyan); border-color: var(--cyan); }
   .tag.win  { color: var(--green); border-color: var(--green); }
   .tag.loss { color: var(--red); border-color: var(--red); }
@@ -504,7 +520,7 @@ async function fetchJson(path) {
 
 async function refresh() {
   try {
-    const [status, symbols, strategies, history, decisions, actions, positions, perps, risk] = await Promise.all([
+    const [status, symbols, strategies, history, decisions, actions, positions, perps, perpsClosed, risk] = await Promise.all([
       fetchJson('/status'),
       fetchJson('/symbols'),
       fetchJson('/strategies'),
@@ -513,13 +529,14 @@ async function refresh() {
       fetchJson('/ai/actions?limit=5').catch(() => []),
       fetchJson('/positions'),
       fetchJson('/perps').catch(() => ({ positions: [] })),
+      fetchJson('/perps/closed?limit=10').catch(() => []),
       fetchJson('/risk'),
     ]);
 
     renderScore(status, risk);
     renderTargets(symbols.symbols, status, positions, perps);
     await renderLoadout(strategies.strategies, status);
-    renderActivity(history, decisions, actions);
+    renderActivity(history, decisions, actions, perps, perpsClosed);
     renderDetails(status, risk);
 
   } catch (e) {
@@ -729,12 +746,55 @@ async function renderLoadout(strategies, status) {
   }).join('');
 }
 
-function renderActivity(history, decisions, actions) {
+function renderActivity(history, decisions, actions, perpsOpenRes, perpsClosed) {
   const items = [];
+
+  // Perp opens — pull from currently-open perps (so they show in feed even
+  // before they close). Use entryTime as the timestamp.
+  for (const p of (perpsOpenRes?.positions || [])) {
+    items.push({
+      ts: new Date(p.entryTime).getTime(),
+      tag: 'OPEN',
+      tagCls: 'open',
+      msg: 'OPEN · <b>' + p.symbol + '</b> · ' + p.direction.toUpperCase() + ' ' + p.leverage + 'x · ' + (p.strategy || '') + ' @ ' + fmtPrice(p.entryPrice),
+      id: 'po' + p.id,
+      strategy: p.strategy,
+    });
+  }
+
+  // Perp closes — most recent first
+  for (const c of (perpsClosed || [])) {
+    const pnl = c.realizedPnlUsdc ?? 0;
+    const cls = pnl >= 0 ? 'win' : 'loss';
+    const sign = pnl >= 0 ? '+' : '−';
+    const reasonTag = c.exitReason === 'liquidation' ? 'loss' : cls;
+    const reasonLabel = c.exitReason === 'liquidation' ? 'LIQ' : cls.toUpperCase();
+    items.push({
+      ts: new Date(c.exitTime).getTime(),
+      tag: reasonLabel,
+      tagCls: reasonTag,
+      msg: 'CLOSE · <b>' + c.symbol + '</b> · ' + c.direction.toUpperCase() + ' ' + c.leverage + 'x · ' + c.exitReason + ' · <span class="pnl-' + (pnl >= 0 ? 'pos' : 'neg') + '">' + sign + '$' + Math.abs(pnl).toFixed(2) + '</span>',
+      id: 'pc' + c.id,
+      strategy: c.strategy,
+    });
+  }
+
 
   // Trades — newest first, classify as open/win/loss
   for (const t of history) {
     const ts = new Date(t.timestamp).getTime();
+    // For close rows, the strategy field on exit rows is "risk_exit_*" or
+    // "close_*". Normalize back to the underlying strategy by looking at the
+    // closed-position entry — but we don't have that here. Use t.strategy as-is.
+    // The combat log treats risk_exit_take_profit etc. as system events.
+    // Trades-with-exit records the exiting strategy alias; use input_mint→USDC
+    // pattern to know it's a sell.
+    const stratRaw = t.strategy || '';
+    // Map alias forms back to canonical strategy if possible
+    const strategy = stratRaw.startsWith('risk_exit_') || stratRaw.startsWith('close_')
+      ? null  // exit alias — strategy unknown from this row alone
+      : stratRaw;
+
     if (t.exit_reason) {
       const pnl = parseFloat(t.realized_pnl);
       const cls = pnl >= 0 ? 'win' : 'loss';
@@ -744,34 +804,38 @@ function renderActivity(history, decisions, actions) {
         ts, tag: cls.toUpperCase(), tagCls: cls,
         msg: 'CLOSE · <b>' + symbol + '</b> · ' + t.exit_reason + ' · <span class="pnl-' + (pnl >= 0 ? 'pos' : 'neg') + '">' + sign + '$' + Math.abs(pnl).toFixed(2) + '</span>',
         id: 't' + t.id,
+        strategy,
       });
     } else if (t.status === 'paper_filled' || t.status === 'success') {
       const symbol = symbolFromMint(t.input_mint) === 'USDC' ? symbolFromMint(t.output_mint) : symbolFromMint(t.input_mint);
       items.push({
         ts, tag: 'OPEN', tagCls: 'open',
-        msg: 'OPEN · <b>' + symbol + '</b> · ' + (t.strategy || 'manual') + ' · ' + fmtPrice(t.price_at_trade || 0),
+        msg: 'OPEN · <b>' + symbol + '</b> · ' + (strategy || 'manual') + ' · ' + fmtPrice(t.price_at_trade || 0),
         id: 't' + t.id,
+        strategy,
       });
     }
   }
 
-  // AI decisions — newest first
+  // AI decisions — always Oracle persona
   for (const d of decisions) {
     const ts = new Date(d.timestamp).getTime();
     items.push({
       ts, tag: 'AI', tagCls: 'ai',
       msg: 'Decider <b>' + (d.action || '?').toUpperCase() + '</b> · conf ' + (d.confidence ?? 0) + ' · "' + (d.reason || '').slice(0, 80) + '"',
       id: 'd' + d.id,
+      strategy: 'ai_strategy_v1',
     });
   }
 
-  // AI actions (auto-tune, reviewer)
+  // AI actions (auto-tune, reviewer) — credited to the strategy being tuned
   for (const a of actions) {
     const ts = new Date(a.timestamp).getTime();
     items.push({
       ts, tag: 'TUNE', tagCls: 'tune',
       msg: a.source + ' · ' + (a.strategy || '') + ' · ' + (a.key || '') + ' <b>' + a.old_value + ' → ' + a.new_value + '</b>',
       id: 'a' + a.id,
+      strategy: a.strategy || null,
     });
   }
 
@@ -803,10 +867,19 @@ function renderActivity(history, decisions, actions) {
   }
   lastAiActionId = newestActionId;
 
-  // Render top 25
+  // Render top 25 with strategy avatar prepended
   const top = items.slice(0, 25);
   document.getElementById('log').innerHTML = top.map((it) => {
-    return '<div class="log-entry"><span class="t">' + fmtTime(it.ts) + '</span><span class="tag ' + it.tagCls + '">' + it.tag + '</span><span class="msg">' + it.msg + '</span></div>';
+    const persona = it.strategy ? PERSONAS[it.strategy] : null;
+    const avatar = persona
+      ? '<span class="log-avatar ' + persona.cls + '" title="' + persona.callsign + '">' + persona.svg + '</span>'
+      : '<span class="log-avatar system" title="system">·</span>';
+    return '<div class="log-entry">' +
+      avatar +
+      '<span class="t">' + fmtTime(it.ts) + '</span>' +
+      '<span class="tag ' + it.tagCls + '">' + it.tag + '</span>' +
+      '<span class="msg">' + it.msg + '</span>' +
+    '</div>';
   }).join('') || '<div class="loading">No activity</div>';
 }
 
