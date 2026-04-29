@@ -219,6 +219,59 @@ async function handleRequest(
       return;
     }
 
+    if (method === 'GET' && pathname === '/perps') {
+      // Open perp positions with unrealized PnL using current prices
+      const priceMap = agent.getCurrentPriceMap();
+      const open = agent.perpEngine.getOpen().map((p) => {
+        const mark = priceMap.get(p.mint) ?? p.entryPrice;
+        const directionSign = p.direction === 'long' ? 1 : -1;
+        const grossPnl = (mark - p.entryPrice) * p.size * directionSign;
+        const netPnl = grossPnl - p.fundingAccrued;
+        const equity = p.collateralUsdc + netPnl;
+        const equityPct = (equity / p.collateralUsdc) * 100;
+        return {
+          ...p,
+          mark,
+          unrealizedGross: grossPnl,
+          unrealizedNet: netPnl,
+          equityUsdc: equity,
+          equityPct,
+        };
+      });
+      done(200, { positions: open });
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/perps/closed') {
+      const limitRaw = url.searchParams.get('limit') ?? '20';
+      const limit = Math.min(500, Math.max(1, Number.parseInt(limitRaw, 10) || 20));
+      done(200, agent.perpEngine.getClosed(limit));
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/perps/close') {
+      const raw = await readBody(req);
+      const body = parseJson<{ positionId?: string; reason?: string }>(raw);
+      if (typeof body.positionId !== 'string') {
+        done(400, { error: 'positionId required' });
+        return;
+      }
+      const pos = agent.perpEngine.getOpen().find((p) => p.id === body.positionId);
+      if (!pos) {
+        done(404, { error: 'position not found' });
+        return;
+      }
+      const priceMap = agent.getCurrentPriceMap();
+      const mark = priceMap.get(pos.mint);
+      if (mark === undefined) {
+        done(400, { error: 'no live price for position mint' });
+        return;
+      }
+      const closed = agent.perpEngine.closePerp(pos.id, mark, (body.reason as 'manual_api') ?? 'manual_api');
+      done(200, closed);
+      return;
+    }
+
     if (method === 'GET' && pathname === '/positions/closed') {
       const limitRaw = url.searchParams.get('limit') ?? '20';
       const limit = Math.min(500, Math.max(1, Number.parseInt(limitRaw, 10) || 20));

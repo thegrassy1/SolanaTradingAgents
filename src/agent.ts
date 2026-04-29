@@ -15,6 +15,8 @@ import { PositionManager } from './positions';
 import { calculatePrice, getQuote, PriceMonitor } from './price';
 import { MultiSymbolMonitor } from './multiPrice';
 import { getActiveUniverse, getSymbolByMint } from './symbols';
+import { PerpEngine } from './perp';
+import type { PerpDirection } from './perp';
 import { RiskManager, type TradeOutcome } from './risk';
 import { registry } from './strategies/registry';
 import { swap } from './swap';
@@ -46,16 +48,22 @@ function rawToHumanAmount(mint: string, raw: string | bigint): number {
   return Number(b) / 10 ** getTokenDecimals(mint);
 }
 
-const ALL_STRATEGY_NAMES = ['mean_reversion_v1', 'breakout_v1', 'buy_and_hold_v1', 'ai_strategy_v1'];
+const ALL_STRATEGY_NAMES = [
+  'mean_reversion_v1',
+  'breakout_v1',
+  'buy_and_hold_v1',
+  'ai_strategy_v1',
+  'mean_reversion_short_v1',
+];
 
 export class TradingAgent {
   private readonly cfg: AppConfig;
   readonly priceMonitor: PriceMonitor;
-  /** Multi-symbol price monitor — collects history for the full universe.
-   *  In P1 it runs alongside priceMonitor for data collection only.
-   *  In P2 strategies will read from this directly. */
+  /** Multi-symbol price monitor — runs one PriceMonitor per universe symbol. */
   readonly multiMonitor: MultiSymbolMonitor;
   readonly positionManager: PositionManager;
+  /** Paper-perp engine — handles leveraged longs/shorts with funding + liquidation. */
+  perpEngine!: PerpEngine;
   readonly riskManager: RiskManager;
   private running = false;
   mode: 'paper' | 'live';
@@ -124,6 +132,8 @@ export class TradingAgent {
     );
     this.multiMonitor = new MultiSymbolMonitor(cfg.pollIntervalMs);
     this.positionManager = new PositionManager();
+    // Perp engine shares the per-strategy portfolio map for collateral
+    this.perpEngine = new PerpEngine(this.portfolios, cfg.quoteMint);
     this.riskManager = new RiskManager(cfg);
     this.loadPersistedRuntimeKeys();
   }
@@ -724,6 +734,106 @@ export class TradingAgent {
     }
   }
 
+  /**
+   * Open a perp position via the perp engine. Sister of executeStrategyBuy
+   * for spot. Sizes collateral based on the strategy's risk-per-trade,
+   * adjusted by the dynamic risk multiplier and the leverage.
+   */
+  private async executePerpEntry(
+    stratName: string,
+    targetMint: string,
+    entryPrice: number,
+    direction: PerpDirection,
+    leverage: number,
+  ): Promise<void> {
+    const portfolio = this.getPortfolioForStrategy(stratName);
+    const targetSym = getSymbolByMint(targetMint);
+    const targetLabel = targetSym?.symbol ?? targetMint.slice(0, 4);
+
+    try {
+      // Per-strategy + daily-loss gates (same as spot)
+      const totalOpenCount =
+        this.positionManager.getOpenPositions().length +
+        this.perpEngine.getOpen().length;
+      const gate = this.riskManager.canOpenPosition(
+        totalOpenCount,
+        this.strategyDailyPnL.get(stratName) ?? this.dailyRealizedPnL,
+        this.strategyDailyStartValue.get(stratName) ?? this.dailyStartingValueQuote,
+      );
+      if (!gate.allowed) {
+        console.log(`[AGENT][${stratName}][${targetLabel}] Perp entry blocked: ${gate.reason ?? 'risk'}`);
+        return;
+      }
+
+      // Sector cap — count both spot and perp positions
+      if (targetSym) {
+        const allOpen = [
+          ...this.positionManager.getOpenPositions().map((p) => ({ mint: p.mint })),
+          ...this.perpEngine.getOpen().map((p) => ({ mint: p.mint })),
+        ];
+        const conflictingSector = allOpen.find((p) => {
+          const otherSym = getSymbolByMint(p.mint);
+          return otherSym?.sector === targetSym.sector && p.mint !== targetMint;
+        });
+        if (conflictingSector) {
+          const otherLabel = getSymbolByMint(conflictingSector.mint)?.symbol ?? '?';
+          console.log(
+            `[AGENT][${stratName}][${targetLabel}] Perp blocked: sector_cap (${targetSym.sector}) — already open on ${otherLabel}`,
+          );
+          return;
+        }
+      }
+
+      // Size collateral: use risk-per-trade % of NAV; SL distance defines risk
+      const { totalValue: nav } = await portfolio.getPortfolioValue(this.cfg.quoteMint);
+      const slPct = this.riskManager.stopLossPercent;
+      const tpPct = this.riskManager.takeProfitPercent;
+      const riskMultiplier = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
+      const effectiveRisk = this.riskManager.riskPerTradePercent * Math.max(0.1, riskMultiplier);
+
+      // For a leveraged perp:
+      //   Adverse move at SL = slPct of entry
+      //   Loss at SL = collateral × leverage × slPct
+      //   Risk equation: collateral × leverage × slPct = nav × effectiveRisk
+      //   ⇒ collateral = nav × effectiveRisk / (leverage × slPct)
+      let collateralUsdc = (nav * effectiveRisk) / (leverage * slPct);
+
+      // Clamp to: available USDC, gross cap (30% NAV deployed)
+      const PERP_GROSS_CAP_PCT = 0.30;
+      const stratPerps = this.perpEngine.getOpen().filter((p) => p.strategy === stratName);
+      const grossDeployed = stratPerps.reduce((s, p) => s + p.collateralUsdc, 0);
+      const remainingCap = Math.max(0, nav * PERP_GROSS_CAP_PCT - grossDeployed);
+      collateralUsdc = Math.min(collateralUsdc, remainingCap);
+
+      const usdcAvailHuman = Number(portfolio.getBalance(this.cfg.quoteMint).raw) / 1e6;
+      collateralUsdc = Math.min(collateralUsdc, usdcAvailHuman);
+
+      if (collateralUsdc < 5) {
+        console.log(`[AGENT][${stratName}][${targetLabel}] Perp skipped: collateral too small ($${collateralUsdc.toFixed(2)})`);
+        return;
+      }
+
+      const pos = this.perpEngine.openPerp({
+        strategy: stratName,
+        mint: targetMint,
+        direction,
+        entryPrice,
+        collateralUsdc,
+        leverage,
+        stopLossPercent: slPct,
+        takeProfitPercent: tpPct,
+        trailingStopPercent: this.riskManager.trailingStopPercent,
+        mode: this.mode,
+      });
+      if (pos) {
+        this.armStrategyCooldown(`${stratName}:${targetMint}`, null);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[AGENT][${stratName}][${targetLabel}] executePerpEntry failed:`, msg);
+    }
+  }
+
   /** Buy & Hold: convert all USDC to SOL on first tick after warmup; never sell. */
   private async handleBuyAndHold(priceSolUsdc: number): Promise<void> {
     const stratName = 'buy_and_hold_v1';
@@ -973,9 +1083,33 @@ export class TradingAgent {
     const priceMap = this.getCurrentPriceMap();
     const universe = getActiveUniverse();
 
+    // Build per-symbol SMA snapshot for funding rate calc
+    const smaMap = new Map<string, number>();
+    for (const sym of universe) {
+      const m = this.multiMonitor.get(sym.mint);
+      const s = m?.getMovingAverage(20);
+      if (s !== null && s !== undefined) smaMap.set(sym.mint, s);
+    }
+    const solSmaForFunding = this.priceMonitor.getMovingAverage(20);
+    if (solSmaForFunding !== null) smaMap.set(this.cfg.baseMint, solSmaForFunding);
+
+    // ── Perp engine tick: accrue funding, update HWMs, process exits ──
+    this.perpEngine.accrueFunding(priceMap, smaMap);
+    this.perpEngine.updateHighWaterMarks(priceMap);
+    const perpExits = this.perpEngine.checkExits(priceMap);
+    for (const sig of perpExits) {
+      const px = priceMap.get(sig.mint);
+      if (px === undefined) continue;
+      try {
+        this.perpEngine.closePerp(sig.positionId, px, sig.reason);
+      } catch (e) {
+        console.error('[PERP] close failed:', e);
+      }
+    }
+
     this.positionManager.updateHighWaterMarks(priceMap);
 
-    // Process risk exits for ALL open positions (per-symbol prices),
+    // Process risk exits for ALL open SPOT positions (per-symbol prices),
     // excluding buy_and_hold positions which have no SL/TP.
     const allExits = this.positionManager
       .checkExits(priceMap)
@@ -1036,9 +1170,17 @@ export class TradingAgent {
         const strategy = registry.getStrategyByName(stratName);
         if (!strategy) continue;
 
-        // Per (strategy, mint) open-position lookup
-        const openPos = this.positionManager.getOpenPositions()
+        // Per (strategy, mint) open-position lookup — checks BOTH spot and perp
+        const openSpot = this.positionManager.getOpenPositions()
           .find((p) => p.strategy === stratName && p.mint === sym.mint) ?? null;
+        const openPerp = this.perpEngine.getOpen()
+          .find((p) => p.strategy === stratName && p.mint === sym.mint) ?? null;
+        const openPos = openSpot ?? (openPerp ? {
+          id: openPerp.id,
+          entryPrice: openPerp.entryPrice,
+          amount: BigInt(Math.floor(openPerp.size * 1e9)),
+          strategy: openPerp.strategy,
+        } : null);
 
         if (openPos) {
           this.logPositionHoldIfDue(symPrice, `${stratName}:${sym.symbol}`);
@@ -1079,7 +1221,13 @@ export class TradingAgent {
         });
 
         if (signal.action === 'buy') {
-          await this.executeStrategyBuy(stratName, sym.mint, symPrice);
+          // Route through perp engine if the strategy tagged this as a perp signal
+          const perpMeta = (signal.metadata as { perp?: { direction: PerpDirection; leverage: number } } | undefined)?.perp;
+          if (perpMeta) {
+            await this.executePerpEntry(stratName, sym.mint, symPrice, perpMeta.direction, perpMeta.leverage);
+          } else {
+            await this.executeStrategyBuy(stratName, sym.mint, symPrice);
+          }
         }
       }
     }
@@ -1731,9 +1879,13 @@ export class TradingAgent {
     if (!s) return null;
 
     const stats = getStrategyStats(strategyName, this.mode);
-    const openCount = this.positionManager
+    const openSpotCount = this.positionManager
       .getOpenPositions()
       .filter((p) => p.strategy === strategyName).length;
+    const openPerpCount = this.perpEngine
+      .getOpen()
+      .filter((p) => p.strategy === strategyName).length;
+    const openCount = openSpotCount + openPerpCount;
 
     const allClosed = this.positionManager.getClosedPositions(10_000);
     const stratClosed = allClosed.filter((c) => c.strategy === strategyName);
@@ -1766,8 +1918,15 @@ export class TradingAgent {
       portfolio = { ...pnl, balances: balancesJson };
     }
 
-    const cooldownUntil = this.strategyCooldowns.get(strategyName) ?? 0;
-    const cooldownRemaining = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
+    // Cooldown keys are now per (strategy, mint). Report the max remaining.
+    const now = Date.now();
+    let maxCooldownUntil = 0;
+    for (const [key, until] of this.strategyCooldowns) {
+      if (key === strategyName || key.startsWith(`${strategyName}:`)) {
+        if (until > maxCooldownUntil) maxCooldownUntil = until;
+      }
+    }
+    const cooldownRemaining = Math.max(0, Math.ceil((maxCooldownUntil - now) / 1000));
 
     return {
       name: s.name,

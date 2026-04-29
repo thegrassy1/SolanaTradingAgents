@@ -3,6 +3,7 @@ import { BreakoutStrategy } from './breakout';
 import { BuyAndHoldStrategy } from './buyAndHold';
 import { MeanReversionStrategy } from './meanReversion';
 import { AiStrategy } from './aiStrategy';
+import { MeanReversionShortStrategy } from './meanReversionShort';
 
 export class StrategyRegistry {
   private readonly strategies: Map<string, Strategy> = new Map();
@@ -13,6 +14,7 @@ export class StrategyRegistry {
     this.register(new BreakoutStrategy());
     this.register(new BuyAndHoldStrategy());
     this.register(new AiStrategy());
+    this.register(new MeanReversionShortStrategy());
   }
 
   private register(s: Strategy): void {
