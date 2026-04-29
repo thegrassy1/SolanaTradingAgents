@@ -43,23 +43,39 @@
     grid-template-columns: 1fr;
     gap: 14px;
   }
-  /* Two-column layout on tablet+ */
+  /* Sidebar layout on tablet+: loadout on left, everything else fills rest */
   @media (min-width: 900px) {
     .layout {
-      grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+      grid-template-columns: 240px 1fr;
       gap: 18px;
     }
-    .col-left, .col-right { display: flex; flex-direction: column; gap: 8px; }
-    .col-left .hdr, .col-right .hdr { margin: 6px 0 4px; }
+    .col-sidebar, .col-main { display: flex; flex-direction: column; gap: 8px; }
+    .col-sidebar .hdr, .col-main .hdr { margin: 6px 0 4px; }
     /* Score spans both columns at the top */
     .score-panel { grid-column: 1 / -1; }
+    /* Loadout becomes vertical stack when in sidebar */
+    .col-sidebar .loadout {
+      grid-template-columns: 1fr;
+      gap: 1px;
+    }
+    .col-sidebar .slot {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+      padding: 12px 12px;
+      min-height: 0;
+    }
+    .col-sidebar .slot .icon { margin: 0; width: 36px; height: 36px; font-size: 16px; }
+    .col-sidebar .slot .name { font-size: 13px; }
+    .col-sidebar .slot .status { font-size: 11px; margin-top: 2px; }
   }
-  /* Three-column on desktop */
+  /* Wider sidebar on big screens */
   @media (min-width: 1400px) {
     .layout {
-      grid-template-columns: minmax(420px, 1fr) minmax(500px, 1.2fr) minmax(420px, 1fr);
+      grid-template-columns: 280px 1fr;
     }
-    .score-panel { grid-column: 1 / -1; }
   }
 
   /* Subtle scanline overlay for that CRT feel */
@@ -397,8 +413,47 @@
   </div>
 </div>
 
-<!-- ===================== LEFT COLUMN: TARGETS ===================== -->
-<div class="col-left">
+<!-- ===================== SIDEBAR: LOADOUT ===================== -->
+<div class="col-sidebar">
+<div class="hdr">Loadout</div>
+<div class="hud" style="padding: 0;">
+  <span class="corner-tl"></span><span class="corner-bl"></span>
+  <div class="loadout">
+    <div class="slot idle">
+      <div class="icon">M</div>
+      <div>
+        <div class="name">MEAN_REV</div>
+        <div class="status">IDLE 7d</div>
+      </div>
+    </div>
+    <div class="slot active">
+      <div class="icon">B</div>
+      <div>
+        <div class="name">BREAKOUT</div>
+        <div class="status">ARMED</div>
+      </div>
+    </div>
+    <div class="slot active">
+      <div class="icon">H</div>
+      <div>
+        <div class="name">BUY_HOLD</div>
+        <div class="status">HOLDING</div>
+      </div>
+    </div>
+    <div class="slot cooldown">
+      <div class="icon">A</div>
+      <div>
+        <div class="name">AI_FILTER</div>
+        <div class="status">REJECT</div>
+      </div>
+      <div class="cd-bar" style="width: 64%"></div>
+    </div>
+  </div>
+</div>
+</div><!-- /col-sidebar -->
+
+<!-- ===================== MAIN: TARGETS + LOG + DETAILS ===================== -->
+<div class="col-main">
 <div class="hdr">Targets · 5 tracked</div>
 <div class="hud" style="padding: 0;">
   <span class="corner-tl"></span><span class="corner-bl"></span>
@@ -468,39 +523,6 @@
   </div>
 </div>
 
-</div><!-- /col-left -->
-
-<!-- ===================== RIGHT COLUMN: LOADOUT + LOG + DETAILS ===================== -->
-<div class="col-right">
-<!-- ===================== LOADOUT ===================== -->
-<div class="hdr">Loadout · Strategies</div>
-<div class="hud" style="padding: 0;">
-  <span class="corner-tl"></span><span class="corner-bl"></span>
-  <div class="loadout">
-    <div class="slot idle">
-      <div class="icon">M</div>
-      <div class="name">MEAN_REV</div>
-      <div class="status">IDLE 7d</div>
-    </div>
-    <div class="slot active">
-      <div class="icon">B</div>
-      <div class="name">BREAKOUT</div>
-      <div class="status">ARMED</div>
-    </div>
-    <div class="slot active">
-      <div class="icon">H</div>
-      <div class="name">BUY_HOLD</div>
-      <div class="status">HOLDING</div>
-    </div>
-    <div class="slot cooldown">
-      <div class="icon">A</div>
-      <div class="name">AI_FILTER</div>
-      <div class="status">REJECT</div>
-      <div class="cd-bar" style="width: 64%"></div>
-    </div>
-  </div>
-</div>
-
 <!-- ===================== COMBAT LOG ===================== -->
 <div class="hdr">Activity · Live</div>
 <div class="hud" style="padding: 0;">
@@ -549,7 +571,7 @@
   <div class="dp-row"><span class="l">REGIME</span><span class="v">RANGING (vol 0.07%)</span></div>
 </div>
 
-</div><!-- /col-right -->
+</div><!-- /col-main -->
 </div><!-- /layout -->
 
 <script>
