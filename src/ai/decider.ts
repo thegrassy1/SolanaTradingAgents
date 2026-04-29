@@ -51,7 +51,12 @@ export async function runDecider(input: DeciderInput): Promise<DeciderOutput> {
       ? (((input.currentPrice - input.sma) / input.sma) * 100).toFixed(2)
       : 'N/A';
   const volPct = input.volatility != null ? (input.volatility * 100).toFixed(3) : 'N/A';
-  const recentPrices = input.priceHistory.slice(-10).map((p) => `$${p.price.toFixed(2)}`).join(', ');
+  // Compute price-format decimals from latest price magnitude
+  const refPx = input.priceHistory[input.priceHistory.length - 1]?.price ?? input.currentPrice;
+  const histDecimals = refPx > 0 && refPx < 0.01
+    ? Math.max(4, Math.ceil(-Math.log10(refPx)) + 3)
+    : 2;
+  const recentPrices = input.priceHistory.slice(-10).map((p) => `$${p.price.toFixed(histDecimals)}`).join(', ');
 
   const systemPrompt = `You are an AI trading advisor reviewing SOL/USDC signals for a paper trading agent. Your job is to filter buy signals by evaluating market context and accumulated learnings.
 
@@ -62,9 +67,16 @@ Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
 or
 {"decision":"reject","reason":"<one sentence>","confidence":<0-100>,"rationale":"<2-3 sentences>"}`;
 
+  // Pick a number of decimals that surfaces meaningful precision for low-priced
+  // tokens (BONK at ~$0.0000063 needs 8 decimals; SOL at ~$84 only needs 2).
+  const priceDecimals = input.currentPrice > 0 && input.currentPrice < 0.01
+    ? Math.max(4, Math.ceil(-Math.log10(input.currentPrice)) + 3)
+    : 4;
+  const fmtP = (n: number) => '$' + n.toFixed(priceDecimals);
+
   const userContent = `## Market Context
-Price: $${input.currentPrice.toFixed(4)}
-SMA20: ${input.sma != null ? '$' + input.sma.toFixed(4) : 'N/A'}
+Price: ${fmtP(input.currentPrice)}
+SMA20: ${input.sma != null ? fmtP(input.sma) : 'N/A'}
 Deviation from SMA: ${devPct}%
 Volatility: ${volPct}%
 Recent prices (oldest→newest): ${recentPrices}

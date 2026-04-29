@@ -456,7 +456,14 @@ function fmtUsd(n) {
 
 function fmtPrice(n, decimals = 4) {
   if (!Number.isFinite(n)) return '—';
-  if (n < 0.001) return '$' + n.toExponential(2);
+  // For very small prices (BONK-style): show first 3 significant digits
+  // e.g. 0.00000626 → $0.00000626 (compact: $0.0₅626 if browsers supported subscript)
+  if (n > 0 && n < 0.001) {
+    // Find leading zeros after decimal
+    const log = Math.floor(Math.log10(n));      // e.g. -6 for 0.000006
+    const sigDigits = Math.max(2, -log + 2);    // ~ 4 significant digits
+    return '$' + n.toFixed(sigDigits);
+  }
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: decimals });
 }
 
