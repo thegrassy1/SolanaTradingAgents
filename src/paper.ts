@@ -243,9 +243,15 @@ export class PaperTradingEngine {
   }
 
   /**
-   * Compute portfolio value in `quoteMint`. If `priceMap` is provided,
-   * uses cached prices (no Jupiter calls — fast and rate-limit-safe).
-   * Otherwise falls back to live Jupiter quotes for each non-quote balance.
+   * Compute portfolio value in `quoteMint`.
+   *
+   * If `priceMap` is provided (caller opts into cache mode):
+   *   - Uses cached prices, NO Jupiter fallthrough.
+   *   - If a mint isn't in the map, that mint contributes 0 to the total
+   *     (caller has explicitly traded freshness for rate-limit safety).
+   *
+   * If `priceMap` is omitted, falls back to live Jupiter quotes for every
+   * non-quote balance (slow, rate-limit-vulnerable, but always accurate).
    */
   async getPortfolioValue(
     quoteMint: string,
@@ -256,6 +262,8 @@ export class PaperTradingEngine {
   }> {
     const breakdown: { mint: string; balance: number; valueInQuote: number }[] = [];
     let totalValue = 0;
+    const useCache = priceMap !== undefined;
+
     for (const [mint, raw] of Object.entries(this.balances)) {
       if (raw === 0n) continue;
       const balanceHuman = smallestToHuman(mint, raw);
@@ -265,16 +273,21 @@ export class PaperTradingEngine {
         continue;
       }
 
-      // Fast path: use cached price if available
-      const cachedPrice = priceMap?.get(mint);
-      if (cachedPrice !== undefined && cachedPrice > 0) {
-        const quoteHuman = balanceHuman * cachedPrice;
-        breakdown.push({ mint, balance: balanceHuman, valueInQuote: quoteHuman });
-        totalValue += quoteHuman;
+      if (useCache) {
+        const cachedPrice = priceMap.get(mint);
+        if (cachedPrice !== undefined && cachedPrice > 0) {
+          const quoteHuman = balanceHuman * cachedPrice;
+          breakdown.push({ mint, balance: balanceHuman, valueInQuote: quoteHuman });
+          totalValue += quoteHuman;
+        } else {
+          // No cached price — skip rather than hit Jupiter. Caller has
+          // accepted a possibly-stale total in exchange for never blocking.
+          breakdown.push({ mint, balance: balanceHuman, valueInQuote: 0 });
+        }
         continue;
       }
 
-      // Slow path: live Jupiter quote
+      // No-cache path: live Jupiter quote (slow, can 429)
       const { order } = await swapPaper(mint, quoteMint, raw);
       const quoteHuman = smallestToHuman(quoteMint, BigInt(order.outAmount));
       breakdown.push({ mint, balance: balanceHuman, valueInQuote: quoteHuman });
