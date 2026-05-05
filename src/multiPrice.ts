@@ -6,7 +6,7 @@
  * single `onPriceUpdate(mint, price, sma20)` event consumers can subscribe to.
  */
 import { PriceMonitor } from './price';
-import { getActiveUniverse, QUOTE, type SymbolInfo } from './symbols';
+import { getActiveUniverse, QUOTE, type SymbolInfo, SOL_MINT } from './symbols';
 
 export type MultiPriceUpdate = (
   mint: string,
@@ -18,10 +18,15 @@ export class MultiSymbolMonitor {
   private monitors = new Map<string, PriceMonitor>();
   private intervalMs: number;
   private updateHandler: MultiPriceUpdate = () => {};
+  /** External SOL PriceMonitor (the legacy one in agent.ts) so we don't double-poll. */
+  private solExternal: PriceMonitor | null = null;
 
-  constructor(intervalMs: number) {
+  constructor(intervalMs: number, solExternal?: PriceMonitor) {
     this.intervalMs = intervalMs;
+    this.solExternal = solExternal ?? null;
     for (const sym of getActiveUniverse()) {
+      // Skip SOL if we have an external monitor already polling it (avoid 2× rate).
+      if (sym.mint === SOL_MINT && this.solExternal) continue;
       const m = new PriceMonitor(
         sym.mint,
         QUOTE.mint,
@@ -57,6 +62,7 @@ export class MultiSymbolMonitor {
 
   /** Get the PriceMonitor for a given mint, or undefined if not in the universe. */
   get(mint: string): PriceMonitor | undefined {
+    if (mint === SOL_MINT && this.solExternal) return this.solExternal;
     return this.monitors.get(mint);
   }
 
@@ -75,7 +81,10 @@ export class MultiSymbolMonitor {
     sampleCount: number;
   }> {
     return getActiveUniverse().map((s) => {
-      const m = this.monitors.get(s.mint);
+      // For SOL, use the external monitor if it's wired in
+      const m = s.mint === SOL_MINT && this.solExternal
+        ? this.solExternal
+        : this.monitors.get(s.mint);
       return {
         mint: s.mint,
         symbol: s.symbol,

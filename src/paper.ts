@@ -242,7 +242,15 @@ export class PaperTradingEngine {
     return out;
   }
 
-  async getPortfolioValue(quoteMint: string): Promise<{
+  /**
+   * Compute portfolio value in `quoteMint`. If `priceMap` is provided,
+   * uses cached prices (no Jupiter calls — fast and rate-limit-safe).
+   * Otherwise falls back to live Jupiter quotes for each non-quote balance.
+   */
+  async getPortfolioValue(
+    quoteMint: string,
+    priceMap?: Map<string, number>,
+  ): Promise<{
     totalValue: number;
     breakdown: { mint: string; balance: number; valueInQuote: number }[];
   }> {
@@ -256,6 +264,17 @@ export class PaperTradingEngine {
         totalValue += balanceHuman;
         continue;
       }
+
+      // Fast path: use cached price if available
+      const cachedPrice = priceMap?.get(mint);
+      if (cachedPrice !== undefined && cachedPrice > 0) {
+        const quoteHuman = balanceHuman * cachedPrice;
+        breakdown.push({ mint, balance: balanceHuman, valueInQuote: quoteHuman });
+        totalValue += quoteHuman;
+        continue;
+      }
+
+      // Slow path: live Jupiter quote
       const { order } = await swapPaper(mint, quoteMint, raw);
       const quoteHuman = smallestToHuman(quoteMint, BigInt(order.outAmount));
       breakdown.push({ mint, balance: balanceHuman, valueInQuote: quoteHuman });
@@ -264,7 +283,10 @@ export class PaperTradingEngine {
     return { totalValue, breakdown };
   }
 
-  async getPnL(quoteMint: string): Promise<{
+  async getPnL(
+    quoteMint: string,
+    priceMap?: Map<string, number>,
+  ): Promise<{
     currentValue: number;
     initialValue: number;
     pnl: number;
@@ -273,7 +295,7 @@ export class PaperTradingEngine {
     if (this.initialQuoteValue === null) {
       await this.ensureInitialQuoteCaptured();
     }
-    const { totalValue: currentValue } = await this.getPortfolioValue(quoteMint);
+    const { totalValue: currentValue } = await this.getPortfolioValue(quoteMint, priceMap);
     const initialValue = this.initialQuoteValue ?? currentValue;
     const pnl = currentValue - initialValue;
     const pnlPercent = initialValue === 0 ? 0 : (pnl / initialValue) * 100;
