@@ -59,7 +59,11 @@ export class PriceMonitor {
     }
   }
 
+  /** Skip ticks until this timestamp — set after a 429 to back off. */
+  private skipTicksUntilMs = 0;
+
   private async tick(): Promise<void> {
+    if (Date.now() < this.skipTicksUntilMs) return; // 429 backoff window active
     try {
       const q = await getQuote(this.inputMint, this.outputMint, this.amount);
       const dIn = getTokenDecimals(this.inputMint);
@@ -79,7 +83,14 @@ export class PriceMonitor {
       );
       this.onPriceUpdate(price, sma20, change);
     } catch (e) {
-      console.error('[PRICE] tick failed:', e);
+      const msg = (e as Error).message ?? String(e);
+      // On 429, back off for 60s before retrying — let the bucket refill.
+      if (/429|rate limit/i.test(msg)) {
+        this.skipTicksUntilMs = Date.now() + 60_000;
+        console.warn('[PRICE] 429 hit — backing off 60s for', this.inputMint.slice(0, 4));
+      } else {
+        console.error('[PRICE] tick failed:', e);
+      }
     }
   }
 

@@ -163,8 +163,33 @@ async function handleRequest(
     }
 
     if (method === 'GET' && pathname === '/status') {
-      const body = await agent.getStatus();
-      done(200, body);
+      try {
+        const body = await agent.getStatus();
+        done(200, body);
+      } catch (e) {
+        // Defensive: never let /status 500 — dashboard polls this every 4s
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn('[STATUS] degraded:', msg);
+        done(200, {
+          mode: agent.mode,
+          running: agent.isRunning(),
+          regime: 'unknown',
+          degraded: true,
+          degradedReason: msg,
+          recentTrades: [],
+          tradeSummary: { wins: 0, losses: 0, winRate: 0, totalRealizedPnl: 0, closedTrades: 0 },
+          paperPortfolio: { balances: {}, pnl: { currentValue: 0, initialValue: 0, pnl: 0, pnlPercent: 0 } },
+          dailyRealizedPnL: 0,
+          dailyRealizedPnLNet: 0,
+          dailyStartingValueQuote: 0,
+          uptimeMs: 0,
+          openPositionsCount: 0,
+          risk: agent.riskManager.snapshot(),
+          thresholdPct: 0,
+          latestPrice: null, sma: null, volatility: null, priceChange: null,
+          cooldownRemaining: 0,
+        });
+      }
       return;
     }
 

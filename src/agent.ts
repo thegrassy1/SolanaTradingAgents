@@ -130,7 +130,8 @@ export class TradingAgent {
       cfg.tradeAmountLamports,
       cfg.pollIntervalMs,
     );
-    this.multiMonitor = new MultiSymbolMonitor(cfg.pollIntervalMs);
+    // Pass the SOL legacy monitor so multiMonitor doesn't double-poll SOL
+    this.multiMonitor = new MultiSymbolMonitor(cfg.pollIntervalMs, this.priceMonitor);
     this.positionManager = new PositionManager();
     // Perp engine shares the per-strategy portfolio map for collateral
     this.perpEngine = new PerpEngine(this.portfolios, cfg.quoteMint);
@@ -334,7 +335,7 @@ export class TradingAgent {
   private async portfolioValueQuote(): Promise<number> {
     let total = 0;
     for (const engine of this.portfolios.values()) {
-      const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint);
+      const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint, this.getCurrentPriceMap());
       total += totalValue;
     }
     return total;
@@ -367,7 +368,7 @@ export class TradingAgent {
       const prevKey = this.strategyDailyDateKey.get(stratName);
       if (prevKey !== key) {
         // Day rolled over — reset and snapshot new baseline
-        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint);
+        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint, this.getCurrentPriceMap());
         this.strategyDailyDateKey.set(stratName, key);
         this.strategyDailyStartValue.set(stratName, totalValue);
         this.strategyDailyPnL.set(stratName, 0);
@@ -375,7 +376,7 @@ export class TradingAgent {
         console.log(`[AGENT][${stratName}] UTC day ${key}: daily NAV baseline=${totalValue.toFixed(2)}`);
       } else if ((this.strategyDailyStartValue.get(stratName) ?? 0) <= 0) {
         // First tick today — set baseline
-        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint);
+        const { totalValue } = await engine.getPortfolioValue(this.cfg.quoteMint, this.getCurrentPriceMap());
         this.strategyDailyStartValue.set(stratName, totalValue);
       }
     }
@@ -647,7 +648,9 @@ export class TradingAgent {
       }
 
       const stopLossPrice = entryPrice * (1 - this.riskManager.stopLossPercent);
-      const { totalValue: nav } = await portfolio.getPortfolioValue(this.cfg.quoteMint);
+      const { totalValue: nav } = await portfolio.getPortfolioValue(
+        this.cfg.quoteMint, this.getCurrentPriceMap(),
+      );
       const riskMultiplier = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
       const { usdcMicroSpend } = this.riskManager.calculatePositionSize(
         nav,
@@ -785,7 +788,9 @@ export class TradingAgent {
       }
 
       // Size collateral: use risk-per-trade % of NAV; SL distance defines risk
-      const { totalValue: nav } = await portfolio.getPortfolioValue(this.cfg.quoteMint);
+      const { totalValue: nav } = await portfolio.getPortfolioValue(
+        this.cfg.quoteMint, this.getCurrentPriceMap(),
+      );
       const slPct = this.riskManager.stopLossPercent;
       const tpPct = this.riskManager.takeProfitPercent;
       const riskMultiplier = this.strategyRiskMultiplier.get(stratName) ?? 1.0;
@@ -1602,14 +1607,20 @@ export class TradingAgent {
     regime: MarketRegime;
     regimeDetail?: RegimeResult;
   }> {
-    // Aggregate P&L across all portfolios
+    // Aggregate P&L across all portfolios — use cached prices to avoid
+    // hitting Jupiter on every /status request (was causing 429 cascades).
+    const priceMap = this.getCurrentPriceMap();
     let aggCurrentValue = 0;
     let aggInitialValue = 0;
     const aggBalancesRaw: Record<string, bigint> = {};
     for (const engine of this.portfolios.values()) {
-      const pnl = await engine.getPnL(this.cfg.quoteMint);
-      aggCurrentValue += pnl.currentValue;
-      aggInitialValue += pnl.initialValue;
+      try {
+        const pnl = await engine.getPnL(this.cfg.quoteMint, priceMap);
+        aggCurrentValue += pnl.currentValue;
+        aggInitialValue += pnl.initialValue;
+      } catch (e) {
+        console.warn('[STATUS] portfolio PnL failed (skipped):', (e as Error).message);
+      }
       for (const [mint, bal] of Object.entries(engine.getAllBalances())) {
         aggBalancesRaw[mint] = (aggBalancesRaw[mint] ?? 0n) + bal.raw;
       }
@@ -1675,9 +1686,10 @@ export class TradingAgent {
     }>
   > {
     const out = [];
+    const priceMap = this.getCurrentPriceMap();
     for (const [stratName, engine] of this.portfolios) {
       const strat = registry.getStrategyByName(stratName);
-      const pnl = await engine.getPnL(this.cfg.quoteMint);
+      const pnl = await engine.getPnL(this.cfg.quoteMint, priceMap);
       const balancesRaw = engine.getAllBalances();
       const balancesJson: Record<string, { human: number; raw: string }> = {};
       for (const [mint, bal] of Object.entries(balancesRaw)) {
@@ -1909,7 +1921,7 @@ export class TradingAgent {
     } | undefined;
     const engine = this.portfolios.get(strategyName);
     if (engine) {
-      const pnl = await engine.getPnL(this.cfg.quoteMint);
+      const pnl = await engine.getPnL(this.cfg.quoteMint, this.getCurrentPriceMap());
       const balancesRaw = engine.getAllBalances();
       const balancesJson: Record<string, { human: number; raw: string }> = {};
       for (const [mint, bal] of Object.entries(balancesRaw)) {
