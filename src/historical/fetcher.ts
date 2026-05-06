@@ -1,6 +1,18 @@
 /**
  * Unified historical data fetcher.
  *
+ * Process-lifetime cache of "this gap recently failed to fill" so we don't
+ * re-hammer rate-limited APIs across many backtests in the same sweep.
+ */
+const FAILED_GAP_RETRY_MS = 60_000;
+const recentFailures = new Map<string, number>();
+function gapKey(symbol: string, resolution: string, fromMs: number, toMs: number): string {
+  return `${symbol}|${resolution}|${fromMs}|${toMs}`;
+}
+
+/**
+ * Original fetcher comment continues below.
+ *
  * Public API: `getHistoricalBars(symbol, resolution, fromMs, toMs)`
  *
  * Strategy:
@@ -65,11 +77,20 @@ export async function getHistoricalBars(
     ? [{ fromMs, toMs }]
     : findGaps({ symbol: sym, resolution, fromMs, toMs }, barMs, barMs * 5);
 
-  // Fill gaps from external sources
+  // Fill gaps from external sources, with recent-failure dedup
   for (const gap of gaps) {
+    const key = gapKey(sym, resolution, gap.fromMs, gap.toMs);
+    const lastFail = recentFailures.get(key);
+    if (lastFail && Date.now() - lastFail < FAILED_GAP_RETRY_MS) {
+      // Recently failed — don't retry yet, use what we have in cache
+      continue;
+    }
     const newBars = await fetchGap(sym, resolution, gap.fromMs, gap.toMs, opts, result);
     if (newBars.length > 0) {
       insertBars(sym, resolution, newBars, 'mixed');
+      recentFailures.delete(key);
+    } else {
+      recentFailures.set(key, Date.now());
     }
   }
 
