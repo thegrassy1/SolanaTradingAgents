@@ -85,6 +85,10 @@ export function isRegimeAllowed(stratName: string, regime: MarketRegime): boolea
       return regime === 'ranging';
     case 'breakout_v1':
       return regime !== 'dead';
+    case 'momentum_v1':
+      // Trend-followers thrive in trending regimes, die in ranging.
+      // Allow trending and dead-as-might-trend; skip ranging (chop kills momentum).
+      return regime === 'trending_up' || regime === 'trending_down';
     case 'ai_strategy_v1':
       return regime !== 'dead';
     case 'buy_and_hold_v1':

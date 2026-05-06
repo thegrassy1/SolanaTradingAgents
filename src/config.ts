@@ -128,7 +128,7 @@ export const config: AppConfig = {
   paperTakerFeeBps: parseIntEnv('PAPER_TAKER_FEE_BPS', 10),
   paperNetworkFeeLamports: parseIntEnv('PAPER_NETWORK_FEE_LAMPORTS', 5_000),
   paperPriorityFeeLamports: parseIntEnv('PAPER_PRIORITY_FEE_LAMPORTS', 50_000),
-  strategies: (process.env.STRATEGIES ?? 'mean_reversion_v1,breakout_v1,buy_and_hold_v1,ai_strategy_v1,mean_reversion_short_v1')
+  strategies: (process.env.STRATEGIES ?? 'mean_reversion_v1,breakout_v1,buy_and_hold_v1,ai_strategy_v1,mean_reversion_short_v1,momentum_v1')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),

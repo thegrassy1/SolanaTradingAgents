@@ -314,6 +314,8 @@ For every Phase to merge to `main`:
 | Phase | Status | Owner | Started | Completed |
 |---|---|---|---|---|
 | 1 — Backtester + historical data | ✅ Complete | Claude | 2026-05-05 | 2026-05-05 |
+| 7 — Universe optimization (data-driven) | ✅ Complete | Claude | 2026-05-06 | 2026-05-06 |
+| MOMENTUM_V1 strategy (HUNTER persona) | ✅ Complete | Claude | 2026-05-06 | 2026-05-06 |
 | 2 — Smarter exits | 🟢 Next | — | — | — |
 | 3 — ORACLE generator | ⏳ Queued | — | — | — |
 | 4 — Funding carry | ⏳ Queued (needs P6) | — | — | — |

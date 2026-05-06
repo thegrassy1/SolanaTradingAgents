@@ -244,6 +244,27 @@ async function handleRequest(
       return;
     }
 
+    // Strategy × symbol whitelist (data-driven gating from backtests)
+    if (method === 'GET' && pathname === '/whitelist') {
+      done(200, agent.getStrategySymbolWhitelist());
+      return;
+    }
+    if (method === 'POST' && pathname === '/whitelist') {
+      const raw = await readBody(req);
+      const body = parseJson<{ strategy?: string; symbols?: string[] | null }>(raw);
+      if (typeof body.strategy !== 'string') {
+        done(400, { error: 'strategy required (string)' });
+        return;
+      }
+      if (body.symbols !== null && !Array.isArray(body.symbols)) {
+        done(400, { error: 'symbols must be array of strings or null' });
+        return;
+      }
+      agent.setStrategySymbolWhitelist(body.strategy, body.symbols ?? null);
+      done(200, { strategy: body.strategy, whitelist: agent.getStrategySymbolWhitelist()[body.strategy] });
+      return;
+    }
+
     if (method === 'GET' && pathname === '/perps') {
       // Open perp positions with unrealized PnL using current prices
       const priceMap = agent.getCurrentPriceMap();

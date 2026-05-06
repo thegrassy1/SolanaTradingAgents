@@ -54,6 +54,7 @@ const ALL_STRATEGY_NAMES = [
   'buy_and_hold_v1',
   'ai_strategy_v1',
   'mean_reversion_short_v1',
+  'momentum_v1',
 ];
 
 export class TradingAgent {
@@ -100,12 +101,37 @@ export class TradingAgent {
   private currentRegime: MarketRegime = 'ranging';
   private currentRegimeResult: RegimeResult | null = null;
 
+  // ── Strategy × Symbol whitelist ──────────────────────────────────────────
+  // Backtest-driven: only run a strategy on symbols where it has shown
+  // positive Sharpe over our test window. Updated via /strategies/:name/symbols
+  // API or by editing data/strategy-whitelist.json. Empty array = strategy
+  // disabled. Missing entry = run on ALL active universe symbols (legacy default).
+  //
+  // Initial values from 6-month 1h backtest (2025-11-01 → 2026-05-06):
+  //   momentum_v1:        +13.9% on JTO (Sharpe 1.01) — only profitable combo
+  //   breakout_v1:        +8.9% JTO, +2.0% BONK — others lose
+  //   mean_reversion_v1:  loses on all symbols (was +4% on cherry-picked 35d)
+  //   buy_and_hold_v1:    SOL only by design (benchmark)
+  //   ai_strategy_v1:     filters candidates from above; restrict to same set
+  //   mean_reversion_short_v1: untested, no live trades yet — empty whitelist
+  private strategySymbolWhitelist: Record<string, string[] | undefined> = {
+    momentum_v1:           ['JTO'],
+    breakout_v1:           ['JTO', 'BONK'],
+    mean_reversion_v1:     [],            // disabled — losing on all symbols
+    mean_reversion_short_v1: [],          // untested — keep dark
+    buy_and_hold_v1:       ['SOL'],       // benchmark, unchanged
+    ai_strategy_v1:        ['JTO', 'BONK'],
+  };
+
   // ── Idle auto-tuner ───────────────────────────────────────────────────────
   private lastAutoTuneKey = '';  // UTC date string, checked once per day
   private static readonly IDLE_THRESHOLD_DAYS = 2;
+  // Removed mean_reversion_v1 from auto-tune because the 6-month backtest
+  // shows it loses on every symbol regardless of threshold — relaxing it
+  // further just makes losses bigger. Only tune strategies with proven edge.
   private static readonly IDLE_RELAX: Record<string, { key: string; factor: number }> = {
-    mean_reversion_v1: { key: 'threshold',     factor: 0.95 },
     breakout_v1:       { key: 'minVolatility', factor: 0.85 },
+    momentum_v1:       { key: 'minSlopePct',   factor: 0.90 },
   };
 
   // ── Dynamic risk multiplier ───────────────────────────────────────────────
@@ -894,6 +920,42 @@ export class TradingAgent {
 
   // ----- Main evaluate loop -----
 
+  // ── Strategy × Symbol whitelist ──────────────────────────────────────────
+
+  /**
+   * Returns true if `stratName` is allowed to trade `symbol`.
+   * - If no entry in the whitelist: legacy "all allowed" behavior
+   * - If entry exists but empty: strategy is fully disabled
+   * - Otherwise: only listed symbols allowed
+   */
+  isWhitelisted(stratName: string, symbol: string): boolean {
+    const list = this.strategySymbolWhitelist[stratName];
+    if (list === undefined) return true;             // no entry → allow all
+    return list.includes(symbol.toUpperCase());
+  }
+
+  /** Public read-only view for the API. */
+  getStrategySymbolWhitelist(): Record<string, string[] | undefined> {
+    const out: Record<string, string[] | undefined> = {};
+    for (const [k, v] of Object.entries(this.strategySymbolWhitelist)) {
+      out[k] = v ? [...v] : undefined;
+    }
+    return out;
+  }
+
+  /** Update the whitelist for one strategy. Pass null to remove the entry
+   *  (legacy "all allowed"). Pass an empty array to disable entirely. */
+  setStrategySymbolWhitelist(stratName: string, symbols: string[] | null): void {
+    if (symbols === null) {
+      delete this.strategySymbolWhitelist[stratName];
+    } else {
+      this.strategySymbolWhitelist[stratName] = symbols.map((s) => s.toUpperCase());
+    }
+    console.log(
+      `[WHITELIST] ${stratName} → ${symbols === null ? 'all allowed' : symbols.length === 0 ? 'DISABLED' : symbols.join(',')}`,
+    );
+  }
+
   // ── Idle auto-tuner ───────────────────────────────────────────────────────
 
   /** Returns the UTC date (YYYY-MM-DD) of the most recent ai_action with a given source, or '' if none. */
@@ -1175,6 +1237,10 @@ export class TradingAgent {
         const strategy = registry.getStrategyByName(stratName);
         if (!strategy) continue;
 
+        // Backtest-driven whitelist: don't run a strategy on a symbol where
+        // it has shown negative edge in historical testing.
+        if (!this.isWhitelisted(stratName, sym.symbol)) continue;
+
         // Per (strategy, mint) open-position lookup — checks BOTH spot and perp
         const openSpot = this.positionManager.getOpenPositions()
           .find((p) => p.strategy === stratName && p.mint === sym.mint) ?? null;
@@ -1261,6 +1327,8 @@ export class TradingAgent {
 
           const aiSym = universe.find((s) => s.mint === candMint);
           if (!aiSym) continue;
+          // Whitelist: only consider candidates on symbols where AI has shown edge
+          if (!this.isWhitelisted('ai_strategy_v1', aiSym.symbol)) continue;
           const aiMonitor = this.multiMonitor.get(candMint);
           if (!aiMonitor) continue;
           const aiPx = aiMonitor.getLatestPrice();

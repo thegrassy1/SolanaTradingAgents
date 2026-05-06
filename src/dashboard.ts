@@ -194,6 +194,7 @@ export function getDashboardHtml(): string {
   .slot.persona-stone  { --accent: #b985ff; }
   .slot.persona-oracle { --accent: #ff00d4; }
   .slot.persona-void   { --accent: #7d8a9b; }
+  .slot.persona-hunter { --accent: #ffd66b; }
   .slot .avatar {
     width: 44px; height: 44px; margin: 0 auto 6px;
     border: 1px solid var(--line);
@@ -271,6 +272,7 @@ export function getDashboardHtml(): string {
   .log-avatar.persona-stone   { color: #b985ff; border-color: rgba(185,133,255,0.4); }
   .log-avatar.persona-oracle  { color: #ff00d4; border-color: rgba(255,0,212,0.4); }
   .log-avatar.persona-void    { color: #7d8a9b; border-color: rgba(125,138,155,0.4); }
+  .log-avatar.persona-hunter  { color: #ffd66b; border-color: rgba(255,214,107,0.4); }
   .log-avatar.system { color: var(--muted); opacity: 0.5; }
   .tag.open { color: var(--cyan); border-color: var(--cyan); }
   .tag.win  { color: var(--green); border-color: var(--green); }
@@ -463,6 +465,12 @@ const PERSONAS = {
     title: 'VOID — The Reaper. Shorts overheated prices on the perp engine. Reaps when markets revert.',
     // Hooded reaper silhouette with curved scythe blade
     svg: '<svg viewBox="0 0 50 50" fill="none"><path d="M 12 36 Q 12 16 25 16 Q 38 16 38 36 L 38 44 L 12 44 Z" stroke="currentColor" stroke-width="2"/><path d="M 6 14 Q 16 4 22 12 L 20 14 Q 14 8 8 16 Z" stroke="currentColor" stroke-width="1.5" fill="currentColor" opacity="0.85"/><circle cx="20" cy="26" r="1.6" fill="currentColor"/><circle cx="30" cy="26" r="1.6" fill="currentColor"/><path d="M 20 32 L 30 32" stroke="currentColor" stroke-width="1" opacity="0.6"/></svg>',
+  },
+  momentum_v1: {
+    callsign: 'HUNTER', role: 'TRACKER · MOMENTUM', cls: 'persona-hunter',
+    title: 'HUNTER — The Tracker. Picks the strongest scent (trend) and runs with it. Buys breakouts confirmed by SMA alignment.',
+    // Wolf/predator silhouette: pointed ears, alert eyes, snout
+    svg: '<svg viewBox="0 0 50 50" fill="none"><path d="M 10 20 L 14 8 L 20 16" stroke="currentColor" stroke-width="2" fill="currentColor" opacity="0.8"/><path d="M 30 16 L 36 8 L 40 20" stroke="currentColor" stroke-width="2" fill="currentColor" opacity="0.8"/><path d="M 10 20 Q 10 32 18 40 L 25 44 L 32 40 Q 40 32 40 20" stroke="currentColor" stroke-width="2" fill="none"/><path d="M 18 38 L 25 44 L 32 38" stroke="currentColor" stroke-width="1" opacity="0.6"/><circle cx="18" cy="26" r="1.8" fill="currentColor"/><circle cx="32" cy="26" r="1.8" fill="currentColor"/><path d="M 22 33 L 25 36 L 28 33" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>',
   },
 };
 

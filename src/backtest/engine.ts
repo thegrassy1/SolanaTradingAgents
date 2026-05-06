@@ -38,6 +38,10 @@ const DEFAULT_TAKE_PROFIT = 0.06;
 const DEFAULT_RISK_PER_TRADE = 0.02;
 const DEFAULT_TAKER_FEE_BPS = 10;
 const DEFAULT_SLIPPAGE_BPS = 5;
+/** Bars of history fed to strategies in priceHistory. Big enough for any
+ *  strategy's longest lookback (momentum's smaLong=50, breakout's 20-bar
+ *  high, etc.). Engine still computes its own SMA20 for ctx.sma. */
+const STRATEGY_HISTORY_BARS = 200;
 const SMA_LOOKBACK = 20;
 
 export async function runBacktest(params: BacktestParams): Promise<BacktestResult> {
@@ -142,7 +146,7 @@ export async function runBacktest(params: BacktestParams): Promise<BacktestResul
 
       // 2. Compute strategy signal (open position check happens inside)
       if (!positions.has(symbol)) {
-        const lookback = series.slice(Math.max(0, idxOfBar - SMA_LOOKBACK * 2), idxOfBar + 1);
+        const lookback = series.slice(Math.max(0, idxOfBar - STRATEGY_HISTORY_BARS), idxOfBar + 1);
         if (lookback.length >= SMA_LOOKBACK) {
           const sma = avg(lookback.slice(-SMA_LOOKBACK).map((b) => b.c));
           const vol = stddev(lookback.slice(-SMA_LOOKBACK).map((b) => b.c)) / sma;
