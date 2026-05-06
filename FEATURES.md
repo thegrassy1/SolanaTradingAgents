@@ -15,7 +15,7 @@ If we can't measure it, we don't ship it.
 
 ---
 
-## Phase 1 · Backtester + Historical Data 🟢 NEXT
+## Phase 1 · Backtester + Historical Data ✅ COMPLETE
 
 The single highest-leverage change. Without this, every other improvement on
 this list is guesswork. With it, ideas can be validated in seconds instead of
@@ -313,8 +313,8 @@ For every Phase to merge to `main`:
 
 | Phase | Status | Owner | Started | Completed |
 |---|---|---|---|---|
-| 1 — Backtester + historical data | 🟢 Next | Claude | — | — |
-| 2 — Smarter exits | ⏳ Queued | — | — | — |
+| 1 — Backtester + historical data | ✅ Complete | Claude | 2026-05-05 | 2026-05-05 |
+| 2 — Smarter exits | 🟢 Next | — | — | — |
 | 3 — ORACLE generator | ⏳ Queued | — | — | — |
 | 4 — Funding carry | ⏳ Queued (needs P6) | — | — | — |
 | 5 — Quality metrics | ⏳ Queued | — | — | — |
