@@ -11,7 +11,10 @@
     "start:prod": "node dist/src/index.js",
     "preview:dashboard": "ts-node -e \"const fs=require('fs');const p=require('path');const o=require('os');import('./src/dashboard').then(m=>{const f=p.join(o.tmpdir(),'dashboard-preview.html');fs.writeFileSync(f,m.getDashboardHtml());console.log('Wrote',f);})\"",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "verify": "ts-node scripts/verify-features.ts"
+    "verify": "ts-node scripts/verify-features.ts",
+    "hist:fetch": "ts-node src/historical/fetch-cli.ts",
+    "hist:funding": "ts-node src/historical/fetch-cli.ts -- --funding",
+    "backtest": "ts-node src/backtest/cli.ts"
   },
   "keywords": [],
   "author": "",
