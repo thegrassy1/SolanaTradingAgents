@@ -66,7 +66,8 @@ async function fetchBars(args: Record<string, string | boolean>): Promise<void> 
     console.log(
       `  ${sym}: ${result.bars.length} bars in range | ` +
       `cache: ${result.fromCache} → ${after.bars} (Δ${after.bars - before.bars}) | ` +
-      `birdeye: ${result.fromBirdeye} | coingecko: ${result.fromCoinGecko}`,
+      `binance: ${result.fromBinance} | geckoterminal: ${result.fromGeckoTerminal} | ` +
+      `coingecko: ${result.fromCoinGecko} | birdeye: ${result.fromBirdeye}`,
     );
 
     if (after.earliest && after.latest) {
