@@ -38,28 +38,16 @@ export function getDashboardHtml(): string {
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
   }
+  /* Layout: strategy cards on the left (primary), activity log on the right.
+     Targets become a 1-line ticker at the top — informational, not central. */
   .layout { display: grid; grid-template-columns: 1fr; gap: 14px; }
-  @media (min-width: 900px) {
-    .layout { grid-template-columns: 240px 1fr; gap: 18px; }
-    .col-sidebar, .col-main { display: flex; flex-direction: column; gap: 8px; }
-    .col-sidebar .hdr, .col-main .hdr { margin: 6px 0 4px; }
+  @media (min-width: 1100px) {
+    .layout { grid-template-columns: 1.6fr 1fr; gap: 20px; }
+    .col-main, .col-side { display: flex; flex-direction: column; gap: 10px; }
+    .col-main .hdr, .col-side .hdr { margin: 6px 0 4px; }
     .score-panel { grid-column: 1 / -1; }
-    .col-sidebar .loadout { grid-template-columns: 1fr; gap: 1px; }
-    .col-sidebar .slot {
-      display: grid;
-      grid-template-columns: 52px 1fr;
-      grid-template-rows: auto auto;
-      align-items: center; gap: 12px;
-      text-align: left; padding: 14px 12px; min-height: 0;
-    }
-    .col-sidebar .slot .avatar { margin: 0; width: 48px; height: 48px; grid-row: 1; grid-column: 1; }
-    .col-sidebar .slot > div:nth-child(2) { grid-row: 1; grid-column: 2; }
-    .col-sidebar .slot .stats-mini { grid-row: 2; grid-column: 1 / -1; margin-top: 8px; }
-    .col-sidebar .slot .callsign { font-size: 14px; }
-    .col-sidebar .slot .role { font-size: 10px; margin-top: 2px; }
-    .col-sidebar .slot .status { font-size: 11px; margin-top: 4px; }
+    .ticker-wrap { grid-column: 1 / -1; }
   }
-  @media (min-width: 1400px) { .layout { grid-template-columns: 280px 1fr; } }
 
   body::before {
     content: ''; pointer-events: none; position: fixed; inset: 0;
@@ -187,68 +175,208 @@ export function getDashboardHtml(): string {
   .te-row .v.pos { color: var(--green); }
   .te-row .v.neg { color: var(--red); }
 
-  .loadout { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line-soft); }
-  .slot { background: var(--bg-1); padding: 12px 8px; text-align: center; position: relative; min-height: 92px; --accent: var(--cyan); }
-  .slot.persona-static { --accent: #00e5ff; }
-  .slot.persona-rush   { --accent: #ff7a3c; }
-  .slot.persona-stone  { --accent: #b985ff; }
-  .slot.persona-oracle { --accent: #ff00d4; }
-  .slot.persona-void   { --accent: #7d8a9b; }
-  .slot.persona-hunter { --accent: #ffd66b; }
-  .slot .avatar {
-    width: 44px; height: 44px; margin: 0 auto 6px;
+  /* ===== TICKER (was: targets section) — 1-line price strip ===== */
+  .ticker {
+    display: flex; gap: 0; overflow-x: auto;
+    background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+    border: 1px solid var(--line);
+    position: relative;
+  }
+  .ticker::-webkit-scrollbar { height: 0; }
+  .ticker > .corner-tl, .ticker > .corner-bl { position: absolute; width: 10px; height: 10px; border: 2px solid var(--cyan); }
+  .ticker > .corner-tl { top: -1px; left: -1px; border-right: none; border-bottom: none; }
+  .ticker > .corner-bl { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+  .ticker-cell {
+    flex: 1 0 auto; padding: 12px 18px;
+    border-right: 1px solid var(--line-soft);
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 150px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .ticker-cell:last-child { border-right: none; }
+  .ticker-cell:hover { background: rgba(0,229,255,0.04); }
+  .ticker-cell.tick { animation: pulse-row 1s ease-out; }
+  @keyframes pulse-row { 0% { background: rgba(0,229,255,0.16); } 100% { background: transparent; } }
+  .ticker-cell .sym { font-size: 14px; font-weight: 700; color: var(--fg); letter-spacing: 0.04em; }
+  .ticker-cell .px { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+  .ticker-cell .ch { font-variant-numeric: tabular-nums; font-size: 12px; font-weight: 600; }
+  .ticker-cell .ch.pos { color: var(--green); }
+  .ticker-cell .ch.neg { color: var(--red); }
+  .ticker-cell .reg { width: 6px; height: 6px; display: inline-block; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .ticker-cell .reg.ranging { background: var(--muted); }
+  .ticker-cell .reg.trending_up { background: var(--green); box-shadow: 0 0 4px var(--green); }
+  .ticker-cell .reg.trending_down { background: var(--red); box-shadow: 0 0 4px var(--red); }
+  .ticker-cell .reg.dead { background: #333; }
+
+  /* ===== STRATEGY CARDS — the centerpiece ===== */
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    --accent: var(--cyan);
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 10px 18px;
+    padding: 18px;
+    background: linear-gradient(180deg, var(--bg-2) 0%, var(--bg-1) 100%);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    position: relative;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .card.persona-static { --accent: #00e5ff; }
+  .card.persona-rush   { --accent: #ff7a3c; }
+  .card.persona-stone  { --accent: #b985ff; }
+  .card.persona-oracle { --accent: #ff00d4; }
+  .card.persona-void   { --accent: #7d8a9b; }
+  .card.persona-hunter { --accent: #ffd66b; }
+  .card.active { box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 18%, transparent); }
+  .card.disabled { opacity: 0.45; border-left-color: var(--muted); }
+  .card.disabled .avatar { opacity: 0.5; }
+
+  .card .avatar {
+    grid-row: 1 / span 2; grid-column: 1;
+    width: 80px; height: 80px;
     border: 1px solid var(--line);
     display: flex; align-items: center; justify-content: center;
     color: var(--accent);
     background: radial-gradient(circle at center, rgba(255,255,255,0.04), transparent 70%);
     transition: box-shadow 0.3s, border-color 0.3s;
   }
-  .slot .avatar svg { width: 100%; height: 100%; display: block; }
-  .slot .callsign { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; color: var(--accent); text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 50%, transparent); }
-  .slot .role { font-size: 10px; letter-spacing: 0.1em; color: var(--muted); margin-top: 1px; }
-  .slot .status { font-size: 11px; letter-spacing: 0.08em; margin-top: 4px; text-transform: uppercase; }
-  .slot.active .status { color: var(--green); }
-  .slot.cooldown .status { color: var(--amber); }
-  .slot.idle .status { color: var(--muted); }
-  .slot.disabled { opacity: 0.4; }
-  .slot.active .avatar { border-color: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent), inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent); }
-  .slot.cooldown .avatar { border-color: var(--amber); }
-  .slot.idle .avatar { opacity: 0.55; }
+  .card .avatar svg { width: 100%; height: 100%; display: block; }
+  .card.active .avatar {
+    border-color: var(--accent);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 40%, transparent),
+                inset 0 0 10px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .card.cooldown .avatar { border-color: var(--amber); }
 
-  /* Persona avatar animations (active state only) */
+  /* Card header: callsign + role + status badge */
+  .card .head {
+    grid-row: 1; grid-column: 2;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  .card .callsign {
+    font-size: 18px; font-weight: 700; letter-spacing: 0.12em;
+    color: var(--accent);
+    text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+  .card .role { font-size: 11px; letter-spacing: 0.12em; color: var(--muted); }
+  .card .state-badge {
+    margin-left: auto;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    padding: 3px 9px; border: 1px solid; text-transform: uppercase;
+  }
+  .state-badge.active   { color: var(--green);  border-color: var(--green); }
+  .state-badge.cooldown { color: var(--amber);  border-color: var(--amber); }
+  .state-badge.idle     { color: var(--muted);  border-color: var(--line-soft); }
+  .state-badge.disabled { color: var(--muted);  border-color: var(--line-soft); opacity: 0.7; }
+  .state-badge.gated    { color: var(--magenta); border-color: var(--magenta); }
+
+  /* Whitelist chips strip — directly under header */
+  .card .wl {
+    grid-row: 2; grid-column: 2;
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    font-size: 10px; color: var(--muted); letter-spacing: 0.1em;
+  }
+  .card .wl-label { text-transform: uppercase; opacity: 0.7; }
+  .card .wl-chip {
+    padding: 2px 7px;
+    border: 1px solid var(--line-soft);
+    color: var(--fg);
+    font-weight: 600; letter-spacing: 0.06em; font-size: 11px;
+    background: rgba(0,229,255,0.03);
+  }
+  .card .wl-chip.disabled-tag {
+    color: var(--red); border-color: var(--red); background: rgba(255,59,107,0.05);
+  }
+  .card .wl-chip.all-tag { color: var(--cyan-dim); }
+
+  /* Stat grid — 6 KPIs */
+  .card .stats {
+    grid-row: 3; grid-column: 1 / -1;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
+    background: var(--line-soft);
+    border-top: 1px solid var(--line-soft);
+    margin-top: 6px;
+  }
+  @media (min-width: 640px) {
+    .card .stats { grid-template-columns: repeat(6, 1fr); }
+  }
+  .card .stat {
+    background: var(--bg-1);
+    padding: 10px 6px; text-align: center;
+  }
+  .card .stat .v {
+    font-size: 16px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+  }
+  .card .stat .v.pos { color: var(--green); }
+  .card .stat .v.neg { color: var(--red); }
+  .card .stat .l {
+    font-size: 9px; letter-spacing: 0.14em; color: var(--cyan-dim);
+    margin-top: 3px; text-transform: uppercase;
+  }
+
+  /* Open-positions strip inside cards (only renders if positions > 0) */
+  .card .openpos {
+    grid-row: 4; grid-column: 1 / -1;
+    margin-top: 6px;
+    border-top: 1px dashed var(--line-soft);
+    padding-top: 8px;
+  }
+  .card .openpos-row {
+    display: grid;
+    grid-template-columns: 60px 1fr auto auto;
+    gap: 10px; align-items: center;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px dashed var(--line-soft);
+  }
+  .card .openpos-row:last-child { border-bottom: none; }
+  .card .openpos .pos-sym { color: var(--accent); font-weight: 600; }
+  .card .openpos .pos-info { color: var(--muted); font-size: 11px; }
+  .card .openpos .pos-pnl { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .card .openpos .pos-pnl.pos { color: var(--green); }
+  .card .openpos .pos-pnl.neg { color: var(--red); }
+  .card .openpos .pos-tag { font-size: 9px; padding: 1px 5px; border: 1px solid; letter-spacing: 0.1em; }
+  .card .openpos .pos-tag.long { color: var(--green); border-color: var(--green); }
+  .card .openpos .pos-tag.short { color: var(--red); border-color: var(--red); }
+
+  /* Cooldown drain bar across the bottom */
+  .card .cd-bar { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--amber); box-shadow: 0 0 4px var(--amber); transition: width 0.4s linear; }
+
+  /* Persona animations (port from old .slot rules to .card) */
   @keyframes static-scan { 0%, 100% { transform: translateX(-3px); opacity: 0.6; } 50% { transform: translateX(3px); opacity: 1; } }
-  .slot.persona-static.active .avatar svg line:nth-of-type(1),
-  .slot.persona-static.active .avatar svg line:nth-of-type(2) { transform-origin: 25px 23px; animation: static-scan 2.4s ease-in-out infinite; }
+  .card.persona-static.active .avatar svg line:nth-of-type(1),
+  .card.persona-static.active .avatar svg line:nth-of-type(2) { transform-origin: 25px 23px; animation: static-scan 2.4s ease-in-out infinite; }
 
   @keyframes rush-shake { 0%, 100% { transform: translateY(0); } 25% { transform: translateY(-1px) rotate(-1deg); } 75% { transform: translateY(0.5px) rotate(1deg); } }
   @keyframes rush-eye-pulse { 0%, 100% { stroke-width: 2.2; opacity: 1; } 50% { stroke-width: 3; opacity: 0.6; } }
-  .slot.persona-rush.active .avatar svg path:first-of-type { transform-origin: 25px 12px; animation: rush-shake 0.6s ease-in-out infinite; }
-  .slot.persona-rush.active .avatar svg path:nth-of-type(3),
-  .slot.persona-rush.active .avatar svg path:nth-of-type(4) { animation: rush-eye-pulse 1.2s ease-in-out infinite; }
+  .card.persona-rush.active .avatar svg path:first-of-type { transform-origin: 25px 12px; animation: rush-shake 0.6s ease-in-out infinite; }
+  .card.persona-rush.active .avatar svg path:nth-of-type(3),
+  .card.persona-rush.active .avatar svg path:nth-of-type(4) { animation: rush-eye-pulse 1.2s ease-in-out infinite; }
 
   @keyframes stone-blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
-  .slot.persona-stone.active .avatar svg circle:last-of-type { transform-origin: 25px 24px; animation: stone-blink 4s ease-in-out infinite; }
+  .card.persona-stone.active .avatar svg circle:last-of-type { transform-origin: 25px 24px; animation: stone-blink 4s ease-in-out infinite; }
 
   @keyframes oracle-scan { 0%, 100% { transform: translateX(-2.5px); } 50% { transform: translateX(2.5px); } }
   @keyframes oracle-rays { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-  .slot.persona-oracle.active .avatar svg circle { transform-origin: 25px 28px; animation: oracle-scan 3s ease-in-out infinite; }
-  .slot.persona-oracle.active .avatar svg line { animation: oracle-rays 1.6s ease-in-out infinite; }
+  .card.persona-oracle.active .avatar svg circle { transform-origin: 25px 28px; animation: oracle-scan 3s ease-in-out infinite; }
+  .card.persona-oracle.active .avatar svg line { animation: oracle-rays 1.6s ease-in-out infinite; }
 
-  /* VOID: scythe blade swings, hood drifts, eyes glow ominously */
   @keyframes void-scythe { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(4deg); } }
   @keyframes void-eyes { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
-  .slot.persona-void.active .avatar svg path:nth-of-type(2) { transform-origin: 25px 30px; animation: void-scythe 2.6s ease-in-out infinite; }
-  .slot.persona-void.active .avatar svg circle { animation: void-eyes 1.8s ease-in-out infinite; }
+  .card.persona-void.active .avatar svg path:nth-of-type(2) { transform-origin: 25px 30px; animation: void-scythe 2.6s ease-in-out infinite; }
+  .card.persona-void.active .avatar svg circle { animation: void-eyes 1.8s ease-in-out infinite; }
 
-  /* Persona stats mini-bar */
-  .slot .stats-mini { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
-  .slot .stats-mini .sm-cell { text-align: center; }
-  .slot .stats-mini .sm-cell .v { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; }
-  .slot .stats-mini .sm-cell .v.pos { color: var(--green); }
-  .slot .stats-mini .sm-cell .v.neg { color: var(--red); }
-  .slot .stats-mini .sm-cell .l { color: var(--muted); font-size: 9px; letter-spacing: 0.06em; margin-top: 1px; }
-
-  .slot .cd-bar { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--amber); box-shadow: 0 0 4px var(--amber); }
+  @keyframes hunter-perk { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+  .card.persona-hunter.active .avatar svg path:nth-of-type(1),
+  .card.persona-hunter.active .avatar svg path:nth-of-type(2) { animation: hunter-perk 2s ease-in-out infinite; }
 
   .log { max-height: 320px; overflow-y: auto; font-size: 13px; padding: 0; }
   .log::-webkit-scrollbar { width: 4px; }
@@ -345,32 +473,35 @@ export function getDashboardHtml(): string {
   </div>
 </div>
 
-<div class="col-sidebar">
-<div class="hdr">Loadout</div>
-<div class="hud" style="padding: 0;">
-  <span class="corner-tl"></span><span class="corner-bl"></span>
-  <div class="loadout" id="loadout"><div class="loading">LOADING…</div></div>
-</div>
+<!-- Tiny ticker strip — replaces the old big Targets section -->
+<div class="ticker-wrap">
+  <div class="ticker" id="ticker">
+    <span class="corner-tl"></span><span class="corner-bl"></span>
+    <div class="ticker-cell"><span class="sym">…</span></div>
+  </div>
 </div>
 
+<!-- Strategy cards: the new centerpiece -->
 <div class="col-main">
-<div class="hdr">Targets · <span id="targetCount">—</span> tracked</div>
-<div class="hud" style="padding: 0;">
-  <span class="corner-tl"></span><span class="corner-bl"></span>
-  <div class="targets" id="targets"><div class="loading">LOADING…</div></div>
+  <div class="hdr">Strategies · Loadout</div>
+  <div class="cards" id="cards">
+    <div class="loading">LOADING…</div>
+  </div>
 </div>
 
-<div class="hdr">Activity · Live</div>
-<div class="hud" style="padding: 0;">
-  <span class="corner-tl"></span><span class="corner-bl"></span>
-  <div class="log" id="log"><div class="loading">LOADING…</div></div>
-</div>
+<!-- Activity + details: secondary column -->
+<div class="col-side">
+  <div class="hdr">Activity · Live</div>
+  <div class="hud" style="padding: 0;">
+    <span class="corner-tl"></span><span class="corner-bl"></span>
+    <div class="log" id="log"><div class="loading">LOADING…</div></div>
+  </div>
 
-<div class="details-toggle" onclick="document.getElementById('details').classList.toggle('open')">⌄ DETAILS ⌄</div>
-<div class="hud details-panel" id="details">
-  <span class="corner-tl"></span><span class="corner-bl"></span>
-  <div id="detailsBody"></div>
-</div>
+  <div class="details-toggle" onclick="document.getElementById('details').classList.toggle('open')">⌄ DETAILS ⌄</div>
+  <div class="hud details-panel" id="details">
+    <span class="corner-tl"></span><span class="corner-bl"></span>
+    <div id="detailsBody"></div>
+  </div>
 </div>
 
 </div>
@@ -541,9 +672,13 @@ async function refresh() {
       fetchJson('/risk'),
     ]);
 
+    // Optional whitelist (graceful if endpoint missing on older builds)
+    let whitelist = {};
+    try { whitelist = await fetchJson('/whitelist'); } catch {}
+
     renderScore(status, risk);
-    renderTargets(symbols.symbols, status, positions, perps);
-    await renderLoadout(strategies.strategies, status);
+    renderTicker(symbols.symbols, status);
+    await renderCards(strategies.strategies, status, positions, perps, whitelist);
     renderActivity(history, decisions, actions, perps, perpsClosed);
     renderDetails(status, risk);
 
@@ -605,150 +740,169 @@ function computeStreak(recentTrades) {
   return streak;
 }
 
-function renderTargets(symbols, status, positionsRes, perpsRes) {
-  const container = document.getElementById('targets');
-  document.getElementById('targetCount').textContent = symbols.length;
-
-  // Map mint → open positions (spot longs)
-  const posByMint = {};
-  for (const p of (positionsRes.positions || [])) {
-    posByMint[p.mint] = posByMint[p.mint] || [];
-    posByMint[p.mint].push({ ...p, kind: 'spot' });
-  }
-  // Add perp positions, tagged with direction
-  for (const p of (perpsRes.positions || [])) {
-    posByMint[p.mint] = posByMint[p.mint] || [];
-    posByMint[p.mint].push({ ...p, kind: 'perp' });
-  }
-
+/**
+ * Compact ticker strip — replaces the verbose Targets section.
+ * One row per symbol: regime dot + ticker + price + dev-from-SMA %.
+ * Click a cell → could expand a chart later; for now it just pulses on tick.
+ */
+function renderTicker(symbols, status) {
+  const container = document.getElementById('ticker');
   const overallRegime = status.regime || 'ranging';
 
-  container.innerHTML = symbols.map((s) => {
+  // Preserve corner SVGs at start/end
+  const cellsHtml = symbols.map((s) => {
     if (s.price === null || s.price === undefined) {
-      return '<div class="target"><div class="marker">—</div><div><div class="name">' + s.symbol + '</div><div class="price">awaiting…</div></div><div class="change"></div><div></div></div><div class="target-expand"></div>';
+      return '<div class="ticker-cell" data-mint="' + s.mint + '"><span class="sym">' + s.symbol + '</span><span class="px">—</span><span class="ch">…</span></div>';
     }
     const dev = s.sma20 && s.sma20 !== 0 ? ((s.price - s.sma20) / s.sma20) * 100 : 0;
     const cls = dev >= 0 ? 'pos' : 'neg';
     const arrow = dev >= 0 ? '▲' : '▼';
-    // Per-symbol regime not yet computed — show overall regime as proxy
     const regime = s.symbol === 'SOL' ? overallRegime : 'ranging';
-
-    const pos = posByMint[s.mint] || [];
-    let badge = '<span class="pos-badge empty">—</span>';
-    if (pos.length > 0) {
-      // If any perp short is open, show 'S'. If both long+short, show split.
-      const longs = pos.filter((p) => p.kind === 'spot' || (p.kind === 'perp' && p.direction === 'long'));
-      const shorts = pos.filter((p) => p.kind === 'perp' && p.direction === 'short');
-      if (longs.length > 0 && shorts.length > 0) {
-        badge = '<span class="pos-badge long">' + longs.length + 'L</span><span class="pos-badge short" style="margin-left:4px">' + shorts.length + 'S</span>';
-      } else if (shorts.length > 0) {
-        badge = '<span class="pos-badge short">' + shorts.length + 'S</span>';
-      } else {
-        badge = '<span class="pos-badge long">' + longs.length + 'L</span>';
-      }
-    }
-
-    const expandBody = pos.length > 0
-      ? pos.map((p) => {
-          if (p.kind === 'perp') {
-            const pnl = p.unrealizedNet ?? 0;
-            const pnlCls = pnl >= 0 ? 'pos' : 'neg';
-            const dirLabel = p.direction === 'short' ? 'SHORT' : 'LONG';
-            const fundingFmt = (p.fundingAccrued ?? 0).toFixed(2);
-            return '<div class="te-row"><span class="l">' + (p.strategy || 'perp') + ' · ' + dirLabel + ' ' + (p.leverage || 1) + 'x @ ' + fmtPrice(p.entryPrice) + ' · funding −$' + fundingFmt + '</span><span class="v ' + pnlCls + '">' + fmtUsd(pnl) + '</span></div>' +
-              '<div class="te-row"><span class="l" style="color:var(--amber)">LIQ ' + fmtPrice(p.liquidationPrice) + ' · equity ' + (p.equityPct ?? 100).toFixed(0) + '%</span><span class="v">collat ' + fmtUsd(p.collateralUsdc) + '</span></div>';
-          }
-          const pnl = p.unrealizedPnlNet ?? p.unrealizedPnlQuote ?? 0;
-          const pnlCls = pnl >= 0 ? 'pos' : 'neg';
-          return '<div class="te-row"><span class="l">' + (p.strategy || 'pos') + ' @ ' + fmtPrice(p.entryPrice) + '</span><span class="v ' + pnlCls + '">' + fmtUsd(pnl) + '</span></div>';
-        }).join('')
-      : '';
-
-    return '<div class="target" data-mint="' + s.mint + '" data-prevprice="' + s.price + '" onclick="this.classList.toggle(\\'open\\'); window.SFX&&SFX.click()">' +
-      '<div class="marker regime-' + regime + '">●</div>' +
-      '<div><div class="name">' + s.symbol + '</div><div class="price">' + fmtPrice(s.price) + '</div></div>' +
-      '<div class="change ' + cls + '"><span class="arrow">' + arrow + '</span>' + Math.abs(dev).toFixed(2) + '%</div>' +
-      '<div>' + badge + '</div>' +
-    '</div>' +
-    '<div class="target-expand">' +
-      '<div class="te-row"><span class="l">SMA20</span><span class="v">' + fmtPrice(s.sma20 || 0) + '</span></div>' +
-      '<div class="te-row"><span class="l">VOL · 20</span><span class="v">' + ((s.volatility || 0) * 100).toFixed(2) + '%</span></div>' +
-      '<div class="te-row"><span class="l">REGIME</span><span class="v">' + regime.toUpperCase() + '</span></div>' +
-      '<div class="te-row"><span class="l">SAMPLES</span><span class="v">' + (s.sampleCount || 0) + '</span></div>' +
-      expandBody +
-    '</div>';
+    return '<div class="ticker-cell" data-mint="' + s.mint + '">' +
+      '<span class="sym"><span class="reg ' + regime + '" title="' + regime + '"></span>' + s.symbol + '</span>' +
+      '<span class="px">' + fmtPrice(s.price) + '</span>' +
+      '<span class="ch ' + cls + '">' + arrow + Math.abs(dev).toFixed(2) + '%</span>' +
+      '</div>';
   }).join('');
 
-  // Detect price ticks → pulse + sound
+  container.innerHTML = '<span class="corner-tl"></span><span class="corner-bl"></span>' + cellsHtml;
+
+  // Pulse on price change + sound
   for (const s of symbols) {
     if (s.price === null) continue;
     const prev = prevTickPrices.get(s.mint);
     if (prev !== undefined && prev !== s.price) {
-      const row = container.querySelector('[data-mint="' + s.mint + '"]');
-      if (row) { row.classList.remove('tick'); void row.offsetWidth; row.classList.add('tick'); SFX.tick(); }
+      const cell = container.querySelector('[data-mint="' + s.mint + '"]');
+      if (cell) { cell.classList.remove('tick'); void cell.offsetWidth; cell.classList.add('tick'); SFX.tick(); }
     }
     prevTickPrices.set(s.mint, s.price);
   }
 }
 
-async function renderLoadout(strategies, status) {
-  const container = document.getElementById('loadout');
+/**
+ * Big strategy cards — the new centerpiece of the dashboard.
+ * Each card shows: avatar, callsign/role, state badge, whitelist chips,
+ * 6 KPIs (P&L total, P&L today, W/L, win rate, expectancy, risk-mult),
+ * and live open positions. Cooldown drain bar at the bottom when active.
+ */
+async function renderCards(strategies, status, positionsRes, perpsRes, whitelist) {
+  const container = document.getElementById('cards');
 
-  // Fetch per-strategy status in parallel
+  // Per-strategy status in parallel
   const stratStatuses = await Promise.all(
     strategies.map((s) => fetchJson('/strategies/' + s.name + '/status').catch(() => null))
   );
 
-  container.innerHTML = strategies.map((s, i) => {
+  // Index open positions by strategy
+  const posByStrat = {};
+  for (const p of (positionsRes.positions || [])) {
+    (posByStrat[p.strategy] = posByStrat[p.strategy] || []).push({ ...p, kind: 'spot' });
+  }
+  for (const p of (perpsRes.positions || [])) {
+    (posByStrat[p.strategy] = posByStrat[p.strategy] || []).push({ ...p, kind: 'perp' });
+  }
+
+  // Render order: put Hunter/Rush/Stone (winners + benchmark) on top
+  const order = ['momentum_v1', 'breakout_v1', 'buy_and_hold_v1', 'ai_strategy_v1', 'mean_reversion_v1', 'mean_reversion_short_v1'];
+  const sorted = [...strategies].sort((a, b) => {
+    const ai = order.indexOf(a.name); const bi = order.indexOf(b.name);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
+
+  container.innerHTML = sorted.map((s) => {
+    const stat = stratStatuses[strategies.findIndex((x) => x.name === s.name)];
+    if (!stat) return '';
     const persona = PERSONAS[s.name];
     if (!persona) return '';
-    const stat = stratStatuses[i];
-    if (!stat) return '';
 
-    let stateClass = 'idle';
-    let statusText = 'IDLE';
-
+    // ── State classification ────────────────────────────────────
     const cdSec = Math.ceil((stat.cooldownRemaining || 0) / 1000);
     const lastTradeMs = stat.lastTradeTimestamp ? Date.now() - new Date(stat.lastTradeTimestamp).getTime() : Infinity;
     const idleDays = lastTradeMs / 86400000;
+    const wlList = whitelist[s.name];
+    const isDisabled = Array.isArray(wlList) && wlList.length === 0;
 
-    if (cdSec > 0) {
-      stateClass = 'cooldown';
-      statusText = 'COOLDOWN ' + cdSec + 's';
-    } else if (!stat.regimeAllowed) {
-      stateClass = 'idle';
-      statusText = 'GATED · ' + (stat.regime || '').toUpperCase();
-    } else if (stat.openPositions > 0) {
-      stateClass = 'active';
-      statusText = stat.openPositions + ' OPEN';
-    } else if (idleDays > 2) {
-      stateClass = 'idle';
-      statusText = 'IDLE ' + idleDays.toFixed(0) + 'd';
-    } else {
-      stateClass = 'active';
-      statusText = 'ARMED';
-    }
+    let stateClass = 'idle';
+    let stateLabel = 'IDLE';
+    if (isDisabled) { stateClass = 'disabled'; stateLabel = 'DISABLED'; }
+    else if (cdSec > 0) { stateClass = 'cooldown'; stateLabel = 'COOLDOWN ' + cdSec + 's'; }
+    else if (!stat.regimeAllowed) { stateClass = 'gated'; stateLabel = 'GATED · ' + (stat.regime || '').toUpperCase(); }
+    else if (stat.openPositions > 0) { stateClass = 'active'; stateLabel = stat.openPositions + ' OPEN'; }
+    else if (idleDays > 2 && Number.isFinite(idleDays)) { stateClass = 'idle'; stateLabel = 'IDLE ' + idleDays.toFixed(0) + 'd'; }
+    else { stateClass = 'active'; stateLabel = 'ARMED'; }
 
+    // ── Stats ──────────────────────────────────────────────────
+    const totalPnl = stat.totalPnL ?? 0;
+    const todayPnl = stat.dailyRealizedPnLNet ?? stat.dailyRealizedPnL ?? 0;
     const wins = stat.wins ?? 0;
     const losses = stat.losses ?? 0;
-    const kdr = losses === 0 ? (wins > 0 ? '∞' : '0') : (wins / losses).toFixed(2);
-    const totalPnl = stat.totalPnL ?? 0;
-    const pnlCls = totalPnl >= 0 ? 'pos' : 'neg';
+    const winRate = stat.winRate ?? 0;
+    const expectancy = stat.expectancy ?? 0;
+    const riskMult = stat.riskMultiplier ?? 1.0;
+    const portfolioValue = stat.portfolio?.currentValue ?? 0;
 
-    const cdBar = cdSec > 0 ? '<div class="cd-bar" style="width:' + Math.min(100, cdSec * 2) + '%"></div>' : '';
+    // ── Whitelist chips ────────────────────────────────────────
+    let wlHtml;
+    if (isDisabled) {
+      wlHtml = '<span class="wl-label">SYMBOLS</span><span class="wl-chip disabled-tag">DISABLED</span>';
+    } else if (Array.isArray(wlList) && wlList.length > 0) {
+      wlHtml = '<span class="wl-label">SYMBOLS</span>' +
+        wlList.map((sym) => '<span class="wl-chip">' + sym + '</span>').join('');
+    } else {
+      wlHtml = '<span class="wl-label">SYMBOLS</span><span class="wl-chip all-tag">ALL</span>';
+    }
 
-    return '<div class="slot ' + stateClass + ' ' + persona.cls + '" title="' + persona.title + '">' +
+    // ── Open positions ─────────────────────────────────────────
+    const positions = posByStrat[s.name] || [];
+    let posHtml = '';
+    if (positions.length > 0) {
+      posHtml = '<div class="openpos">' + positions.map((p) => {
+        const sym = SYMBOL_BY_MINT[p.mint] || p.symbol || p.mint.slice(0, 4);
+        if (p.kind === 'perp') {
+          const pnl = p.unrealizedNet ?? 0;
+          const pnlCls = pnl >= 0 ? 'pos' : 'neg';
+          const dirCls = p.direction === 'short' ? 'short' : 'long';
+          const dirText = p.direction === 'short' ? 'SHORT' : 'LONG';
+          return '<div class="openpos-row">' +
+            '<span class="pos-sym">' + sym + '</span>' +
+            '<span class="pos-info">' + dirText + ' ' + (p.leverage || 1) + 'x @ ' + fmtPrice(p.entryPrice) + ' · liq ' + fmtPrice(p.liquidationPrice) + ' · funding −$' + (p.fundingAccrued ?? 0).toFixed(2) + '</span>' +
+            '<span class="pos-tag ' + dirCls + '">' + dirText[0] + '</span>' +
+            '<span class="pos-pnl ' + pnlCls + '">' + fmtUsd(pnl) + '</span>' +
+            '</div>';
+        }
+        const pnl = p.unrealizedPnlNet ?? p.unrealizedPnlQuote ?? 0;
+        const pnlCls = pnl >= 0 ? 'pos' : 'neg';
+        return '<div class="openpos-row">' +
+          '<span class="pos-sym">' + sym + '</span>' +
+          '<span class="pos-info">LONG @ ' + fmtPrice(p.entryPrice) + '</span>' +
+          '<span class="pos-tag long">L</span>' +
+          '<span class="pos-pnl ' + pnlCls + '">' + fmtUsd(pnl) + '</span>' +
+          '</div>';
+      }).join('') + '</div>';
+    }
+
+    // ── Cooldown drain bar ────────────────────────────────────
+    const cdBar = cdSec > 0
+      ? '<div class="cd-bar" style="width:' + Math.min(100, cdSec * 2) + '%"></div>'
+      : '';
+
+    return '<div class="card ' + stateClass + ' ' + persona.cls + '" title="' + persona.title + '">' +
       '<div class="avatar">' + persona.svg + '</div>' +
-      '<div>' +
-        '<div class="callsign">' + persona.callsign + '</div>' +
-        '<div class="role">' + persona.role + '</div>' +
-        '<div class="status">' + statusText + '</div>' +
+      '<div class="head">' +
+        '<span class="callsign">' + persona.callsign + '</span>' +
+        '<span class="role">' + persona.role + '</span>' +
+        '<span class="state-badge ' + stateClass + '">' + stateLabel + '</span>' +
       '</div>' +
-      '<div class="stats-mini">' +
-        '<div class="sm-cell"><div class="v">' + wins + '/' + losses + '</div><div class="l">W/L</div></div>' +
-        '<div class="sm-cell"><div class="v">' + kdr + '</div><div class="l">KDR</div></div>' +
-        '<div class="sm-cell"><div class="v ' + pnlCls + '">' + fmtUsd(totalPnl) + '</div><div class="l">P&L</div></div>' +
+      '<div class="wl">' + wlHtml + '</div>' +
+      '<div class="stats">' +
+        '<div class="stat"><div class="v ' + (totalPnl >= 0 ? 'pos' : 'neg') + '">' + fmtUsd(totalPnl) + '</div><div class="l">P&L Total</div></div>' +
+        '<div class="stat"><div class="v ' + (todayPnl >= 0 ? 'pos' : 'neg') + '">' + fmtUsd(todayPnl) + '</div><div class="l">Today</div></div>' +
+        '<div class="stat"><div class="v">' + wins + '/' + losses + '</div><div class="l">W / L</div></div>' +
+        '<div class="stat"><div class="v">' + winRate.toFixed(1) + '%</div><div class="l">Win Rate</div></div>' +
+        '<div class="stat"><div class="v ' + (expectancy >= 0 ? 'pos' : 'neg') + '">' + fmtUsd(expectancy) + '</div><div class="l">Expect</div></div>' +
+        '<div class="stat"><div class="v">' + riskMult.toFixed(2) + 'x</div><div class="l">Risk Mult</div></div>' +
       '</div>' +
+      posHtml +
       cdBar +
     '</div>';
   }).join('');
