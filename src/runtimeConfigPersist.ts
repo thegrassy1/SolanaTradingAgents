@@ -146,12 +146,50 @@ export function loadStrategyConfigsFromFile(): Record<string, Record<string, num
   return Object.keys(data.strategies).length > 0 ? data.strategies : null;
 }
 
+/**
+ * Load persisted strategy-symbol whitelists. Returns null if absent.
+ * Whitelist values are arrays of symbol tickers OR an empty array (= disabled).
+ * Strategies without a whitelist entry get the legacy "all-allowed" default.
+ */
+export function loadWhitelistsFromFile(): Record<string, string[]> | null {
+  try {
+    if (!fs.existsSync(RUNTIME_CONFIG_PATH)) return null;
+    const raw = fs.readFileSync(RUNTIME_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const wl = parsed.whitelists;
+    if (!wl || typeof wl !== 'object') return null;
+    const out: Record<string, string[]> = {};
+    for (const [strat, syms] of Object.entries(wl as Record<string, unknown>)) {
+      if (!Array.isArray(syms)) continue;
+      out[strat] = syms.filter((s): s is string => typeof s === 'string').map((s) => s.toUpperCase());
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  } catch (e) {
+    console.warn('[CONFIG] Failed to load whitelists:', (e as Error).message);
+    return null;
+  }
+}
+
 export function saveRuntimeConfigFile(
   flat: Record<string, string>,
   strategies: Record<string, Record<string, number>> = {},
+  whitelists?: Record<string, string[]>,
 ): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const payload = `${JSON.stringify({ ...flat, strategies }, null, 2)}\n`;
+  // Preserve any fields from the existing file we're not explicitly writing
+  // (notably: whitelists, when an older caller doesn't pass them).
+  let existing: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(RUNTIME_CONFIG_PATH)) {
+      existing = JSON.parse(fs.readFileSync(RUNTIME_CONFIG_PATH, 'utf8'));
+    }
+  } catch {}
+  // Only overwrite whitelists when the caller passes them explicitly.
+  const preservedWhitelists = whitelists ?? (existing.whitelists ?? {});
+  const payload = `${JSON.stringify(
+    { ...existing, ...flat, strategies, whitelists: preservedWhitelists },
+    null, 2,
+  )}\n`;
   fs.writeFileSync(RUNTIME_CONFIG_TMP, payload, 'utf8');
   fs.renameSync(RUNTIME_CONFIG_TMP, RUNTIME_CONFIG_PATH);
 }

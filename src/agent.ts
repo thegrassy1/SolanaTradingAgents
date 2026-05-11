@@ -26,6 +26,7 @@ import {
   loadDailyState,
   loadRuntimeConfigFile,
   loadStrategyConfigsFromFile,
+  loadWhitelistsFromFile,
   saveDailyState,
   saveRuntimeConfigFile,
   snapshotToPersistable,
@@ -208,6 +209,18 @@ export class TradingAgent {
     if (strategyConfigs) {
       registry.loadConfigs(strategyConfigs);
       console.log('[CONFIG] Loaded strategy configs from disk');
+    }
+    // Restore whitelists so flywheel decisions survive pm2 restarts.
+    // Without this, every restart wiped the flywheel's accumulated learnings.
+    const persistedWhitelists = loadWhitelistsFromFile();
+    if (persistedWhitelists) {
+      for (const [strat, syms] of Object.entries(persistedWhitelists)) {
+        this.strategySymbolWhitelist[strat] = syms;
+      }
+      const summary = Object.entries(persistedWhitelists)
+        .map(([k, v]) => `${k}=[${v.join(',') || 'OFF'}]`)
+        .join(' ');
+      console.log(`[CONFIG] Loaded whitelists from disk: ${summary}`);
     }
     const data = loadRuntimeConfigFile();
     if (!data) return;
@@ -944,7 +957,9 @@ export class TradingAgent {
   }
 
   /** Update the whitelist for one strategy. Pass null to remove the entry
-   *  (legacy "all allowed"). Pass an empty array to disable entirely. */
+   *  (legacy "all allowed"). Pass an empty array to disable entirely.
+   *  Persists to runtime-config.json so the flywheel's decisions survive
+   *  pm2 restarts and accumulate over time. */
   setStrategySymbolWhitelist(stratName: string, symbols: string[] | null): void {
     if (symbols === null) {
       delete this.strategySymbolWhitelist[stratName];
@@ -954,6 +969,25 @@ export class TradingAgent {
     console.log(
       `[WHITELIST] ${stratName} → ${symbols === null ? 'all allowed' : symbols.length === 0 ? 'DISABLED' : symbols.join(',')}`,
     );
+    this.persistWhitelists();
+  }
+
+  /** Write the current whitelist state to runtime-config.json. */
+  private persistWhitelists(): void {
+    // Only persist explicit entries (not the legacy "all allowed" = undefined).
+    const wl: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(this.strategySymbolWhitelist)) {
+      if (Array.isArray(v)) wl[k] = v;
+    }
+    try {
+      saveRuntimeConfigFile(
+        snapshotToPersistable(this.getRuntimeConfigView()),
+        registry.getAllConfigs(),
+        wl,
+      );
+    } catch (e) {
+      console.warn('[WHITELIST] persist failed:', (e as Error).message);
+    }
   }
 
   // ── Idle auto-tuner ───────────────────────────────────────────────────────
