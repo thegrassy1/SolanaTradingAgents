@@ -13,6 +13,36 @@ import type { TradingAgent } from '../agent';
 import { runDataRefresh } from './refresher';
 import { runHealthCheck } from './healthChecker';
 import { runScout } from './scout';
+import { sendTelegramMessage } from '../telegram';
+import type { FlywheelDecision } from './types';
+
+/**
+ * Build a Telegram-friendly summary of flywheel decisions.
+ * Returns null when there's nothing worth notifying (no actionable changes).
+ */
+function formatTelegramSummary(
+  job: string, emoji: string, decisions: FlywheelDecision[],
+): string | null {
+  const actionable = decisions.filter((d) => d.action !== 'no_change');
+  if (actionable.length === 0) return null;
+
+  const lines: string[] = [`${emoji} *Flywheel · ${job}*`];
+  for (const d of actionable) {
+    const arrow = d.action === 'promote' ? '+ ADD'
+                : d.action === 'demote'  ? '− REMOVE'
+                : d.action === 'flag'    ? '⚠ FLAG'
+                :                          '· ' + d.action.toUpperCase();
+    lines.push(`${arrow} \`${d.strategy}\` × \`${d.symbol}\` — Sharpe ${d.metric.toFixed(2)}`);
+    lines.push(`   ${d.reason}`);
+  }
+  return lines.join('\n');
+}
+
+async function notifyTelegram(msg: string | null): Promise<void> {
+  if (!msg) return;
+  try { await sendTelegramMessage(msg); }
+  catch (e) { console.warn('[FLYWHEEL] telegram alert failed:', (e as Error).message); }
+}
 
 export async function flywheelRefresh(): Promise<void> {
   console.log('[FLYWHEEL] data refresh starting');
@@ -37,6 +67,7 @@ export async function flywheelHealth(agent: TradingAgent): Promise<void> {
     for (const d of demotes) {
       console.log(`[FLYWHEEL][demote] ${d.strategy}×${d.symbol}: ${d.reason}`);
     }
+    await notifyTelegram(formatTelegramSummary('Health (6h check)', '🔧', decisions));
   } catch (e) {
     console.error('[FLYWHEEL] health check failed:', e);
   }
@@ -53,6 +84,7 @@ export async function flywheelScout(agent: TradingAgent): Promise<void> {
     for (const d of promotes) {
       console.log(`[FLYWHEEL][promote] ${d.strategy}×${d.symbol}: ${d.reason}`);
     }
+    await notifyTelegram(formatTelegramSummary('Scout (daily search)', '🎯', decisions));
   } catch (e) {
     console.error('[FLYWHEEL] scout failed:', e);
   }
