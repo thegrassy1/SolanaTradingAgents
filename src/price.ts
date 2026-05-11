@@ -70,6 +70,24 @@ export class PriceMonitor {
       const dOut = getTokenDecimals(this.outputMint);
       const price = calculatePrice(q, dIn, dOut);
       const t = Date.now();
+
+      // SANITY GATE: Jupiter occasionally returns a wildly bad quote due to
+      // dead pools or stale routes. If the new price differs from the most
+      // recent observation by >25%, reject it — it's almost certainly bad.
+      // We've seen quotes 8× off real price cause $213 phantom PnL in
+      // closed positions. Better to drop a tick than corrupt our state.
+      const last = this.history[this.history.length - 1];
+      if (last && last.price > 0) {
+        const ratio = Math.max(price, last.price) / Math.min(price, last.price);
+        if (ratio > 1.25) {
+          console.warn(
+            `[PRICE] Rejected glitched quote for ${this.inputMint.slice(0, 4)}: ` +
+            `${last.price.toFixed(6)} → ${price.toFixed(6)} (${((ratio - 1) * 100).toFixed(0)}% jump)`,
+          );
+          return;
+        }
+      }
+
       this.history.push({ t, price });
       if (this.history.length > 300) {
         this.history.splice(0, this.history.length - 300);

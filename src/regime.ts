@@ -86,9 +86,14 @@ export function isRegimeAllowed(stratName: string, regime: MarketRegime): boolea
     case 'breakout_v1':
       return regime !== 'dead';
     case 'momentum_v1':
-      // Trend-followers thrive in trending regimes, die in ranging.
-      // Allow trending and dead-as-might-trend; skip ranging (chop kills momentum).
-      return regime === 'trending_up' || regime === 'trending_down';
+      // Note: the live regime classifier flags <0.25% slope as "ranging",
+      // which leaves momentum gated out almost permanently at 30s polls.
+      // Momentum's OWN entry rules already require: SMA20>SMA50 + price>SMA20
+      // + breakout above N-bar high + slope > minSlopePct. Those are stricter
+      // than what the regime gate adds. The 6-month backtest that scored
+      // Sharpe 1.01 ran without regime gating — match that here.
+      // Only block in 'dead' regime (no volatility to ride).
+      return regime !== 'dead';
     case 'ai_strategy_v1':
       return regime !== 'dead';
     case 'buy_and_hold_v1':

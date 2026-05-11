@@ -9,6 +9,7 @@ import { startScheduler, stopScheduler } from './scheduler';
 import { sendTelegramMessage } from './telegram';
 import { loadWallet } from './wallet';
 import { runDailyReview } from './ai/reviewer';
+import { flywheelRefresh, flywheelHealth, flywheelScout } from './flywheel/runner';
 
 dotenv.config();
 
@@ -50,11 +51,17 @@ const aiReviewCallback = aiReviewEnabled
   ? () => runDailyReview((actions) => agent.applyAiReviewerActions(actions))
   : undefined;
 
+const flywheelCallbacks = {
+  refresh: () => flywheelRefresh(),
+  health: () => flywheelHealth(agent),
+  scout: () => flywheelScout(agent),
+};
+
 if (config.telegramBotToken && config.telegramChatId) {
-  startScheduler(sendDailyReport, aiReviewCallback);
+  startScheduler(sendDailyReport, aiReviewCallback, flywheelCallbacks);
   console.log('[SCHEDULER] Daily report enabled for', config.reportCron, config.reportTimezone);
 } else {
-  startScheduler(sendDailyReport, aiReviewCallback);
+  startScheduler(sendDailyReport, aiReviewCallback, flywheelCallbacks);
   console.log('[SCHEDULER] Telegram not configured — daily reports disabled');
 }
 
