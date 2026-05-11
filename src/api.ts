@@ -275,6 +275,38 @@ async function handleRequest(
       }
       return;
     }
+    if (method === 'POST' && pathname === '/flywheel/all') {
+      // Single-call full cycle: refresh → health → scout, in order.
+      // Each step's failure is isolated; we always return what we got.
+      const result: {
+        refresh: { ok: boolean; error?: string };
+        health: { decisions: unknown[]; error?: string };
+        scout: { decisions: unknown[]; error?: string };
+        elapsedMs: number;
+      } = {
+        refresh: { ok: false },
+        health: { decisions: [] },
+        scout: { decisions: [] },
+        elapsedMs: 0,
+      };
+      const started = Date.now();
+      try {
+        const { runDataRefresh } = await import('./flywheel/refresher');
+        await runDataRefresh();
+        result.refresh.ok = true;
+      } catch (e) { result.refresh.error = (e as Error).message; }
+      try {
+        const { runHealthCheck } = await import('./flywheel/healthChecker');
+        result.health.decisions = await runHealthCheck(agent);
+      } catch (e) { result.health.error = (e as Error).message; }
+      try {
+        const { runScout } = await import('./flywheel/scout');
+        result.scout.decisions = await runScout(agent);
+      } catch (e) { result.scout.error = (e as Error).message; }
+      result.elapsedMs = Date.now() - started;
+      done(200, result);
+      return;
+    }
 
     // Strategy × symbol whitelist (data-driven gating from backtests)
     if (method === 'GET' && pathname === '/whitelist') {
