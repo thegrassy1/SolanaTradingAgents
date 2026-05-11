@@ -244,6 +244,38 @@ async function handleRequest(
       return;
     }
 
+    // Flywheel — manual triggers for the self-improvement loop
+    if (method === 'POST' && pathname === '/flywheel/health') {
+      try {
+        const { runHealthCheck } = await import('./flywheel/healthChecker');
+        const decisions = await runHealthCheck(agent);
+        done(200, { decisions });
+      } catch (e) {
+        done(500, { error: (e as Error).message });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/flywheel/scout') {
+      try {
+        const { runScout } = await import('./flywheel/scout');
+        const decisions = await runScout(agent);
+        done(200, { decisions });
+      } catch (e) {
+        done(500, { error: (e as Error).message });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/flywheel/refresh') {
+      try {
+        const { runDataRefresh } = await import('./flywheel/refresher');
+        await runDataRefresh();
+        done(200, { ok: true });
+      } catch (e) {
+        done(500, { error: (e as Error).message });
+      }
+      return;
+    }
+
     // Strategy × symbol whitelist (data-driven gating from backtests)
     if (method === 'GET' && pathname === '/whitelist') {
       done(200, agent.getStrategySymbolWhitelist());

@@ -204,8 +204,11 @@ export class PositionManager {
       throw new Error(`Position not found: ${id}`);
     }
     const p = this.open[idx]!;
-    const solHuman = Number(p.amount) / 1e9;
-    const realizedPnlGross = (exitPrice - p.entryPrice) * solHuman;
+
+    // Use correct decimals per mint (was hardcoded SOL=1e9, broke for BONK
+    // which has 5 decimals; was off by ~10,000x).
+    const decimals = getTokenDecimals(p.mint);
+    const tokenHuman = Number(p.amount) / 10 ** decimals;
 
     const exitQuoteAmount =
       opts?.exitQuoteAmount ?? null;
@@ -214,19 +217,44 @@ export class PositionManager {
     const entryQuoteAmount = p.entryQuoteAmount ?? null;
     const entryFeesQuote = p.entryFeesQuote ?? null;
 
+    // SOURCE OF TRUTH for realized PnL:
+    //   When we have entry+exit quote flows from the actual swap legs, use
+    //   them. They reflect the REAL USDC the engine spent and received,
+    //   immune to glitched price quotes.
+    //
+    //   Only fall back to (exitPrice - entryPrice) × size when flow data is
+    //   missing — and tag the gross as "estimated" by clamping it to a
+    //   sanity bound (±100% of entry notional) to prevent a single bad
+    //   Jupiter quote from claiming $213 of profit on a $30 trade.
+    let realizedPnlGross: number;
     let realizedPnlNet: number | null = null;
     let feesQuote: number | null = null;
-    if (
-      entryQuoteAmount !== null &&
-      exitQuoteAmount !== null &&
-      Number.isFinite(entryQuoteAmount) &&
-      Number.isFinite(exitQuoteAmount)
-    ) {
+
+    const haveFlowData =
+      entryQuoteAmount !== null && exitQuoteAmount !== null &&
+      Number.isFinite(entryQuoteAmount) && Number.isFinite(exitQuoteAmount);
+
+    if (haveFlowData) {
       const entryFees = entryFeesQuote ?? 0;
       const exitFees = exitFeesQuote ?? 0;
-      // Net = flow delta - SOL-side fees (taker haircut is already baked into the flows).
+      // Real flow-based PnL — what the engine actually paid/received in USDC.
       realizedPnlNet = (exitQuoteAmount - entryQuoteAmount) - entryFees - exitFees;
+      // Gross excludes only the explicit fee deduction; taker haircut is
+      // already baked into the flow amounts.
+      realizedPnlGross = (exitQuoteAmount - entryQuoteAmount);
       feesQuote = entryFees + exitFees;
+    } else {
+      // Fallback: estimate from prices × size, but clamp to ±entry notional
+      // so a glitched quote can't fabricate P&L.
+      const rawEstimate = (exitPrice - p.entryPrice) * tokenHuman;
+      const notional = entryQuoteAmount ?? Math.abs(p.entryPrice * tokenHuman);
+      const clamp = Math.abs(notional);
+      realizedPnlGross = Math.max(-clamp, Math.min(clamp, rawEstimate));
+      if (Math.abs(rawEstimate - realizedPnlGross) > 0.01) {
+        console.warn(
+          `[POSITION] PnL clamp triggered on ${id.slice(0, 8)}: raw=${rawEstimate.toFixed(2)} clamped=${realizedPnlGross.toFixed(2)} (likely bad exit quote)`,
+        );
+      }
     }
 
     const closed: ClosedPosition = {
