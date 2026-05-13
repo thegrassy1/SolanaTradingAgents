@@ -308,6 +308,26 @@ async function handleRequest(
       return;
     }
 
+    // Trend agent — multi-timeframe direction/strength/phase per symbol
+    if (method === 'GET' && pathname === '/trends') {
+      done(200, {
+        gating: agent.isTrendGatingEnabled(),
+        trends: agent.getCurrentTrends(),
+      });
+      return;
+    }
+    if (method === 'POST' && pathname === '/trend/gating') {
+      const raw = await readBody(req);
+      const body = parseJson<{ enabled?: boolean }>(raw);
+      if (typeof body.enabled !== 'boolean') {
+        done(400, { error: 'enabled: boolean required' });
+        return;
+      }
+      agent.setTrendGating(body.enabled);
+      done(200, { gating: agent.isTrendGatingEnabled() });
+      return;
+    }
+
     // Strategy × symbol whitelist (data-driven gating from backtests)
     if (method === 'GET' && pathname === '/whitelist') {
       done(200, agent.getStrategySymbolWhitelist());

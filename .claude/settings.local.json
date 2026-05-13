@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "mcp__scheduled-tasks__create_scheduled_task"
+      "mcp__scheduled-tasks__create_scheduled_task",
+      "mcp__scheduled-tasks__list_scheduled_tasks"
     ]
   }
 }

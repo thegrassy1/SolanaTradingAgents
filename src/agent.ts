@@ -17,6 +17,8 @@ import { MultiSymbolMonitor } from './multiPrice';
 import { getActiveUniverse, getSymbolByMint } from './symbols';
 import { PerpEngine } from './perp';
 import type { PerpDirection } from './perp';
+import { computeTrendsForAll, strategyWantsFire, type TrendState, type TrendDirection } from './trend';
+import { sendTelegramMessage } from './telegram';
 import { RiskManager, type TradeOutcome } from './risk';
 import { registry } from './strategies/registry';
 import { swap } from './swap';
@@ -101,6 +103,13 @@ export class TradingAgent {
   // ── Regime classifier ─────────────────────────────────────────────────────
   private currentRegime: MarketRegime = 'ranging';
   private currentRegimeResult: RegimeResult | null = null;
+
+  // ── Trend agent (multi-timeframe from historical.db) ──────────────────────
+  private currentTrends: Record<string, TrendState> = {};
+  /** Last-known direction per symbol — used to detect direction flips for alerts. */
+  private lastTrendDirection: Record<string, TrendDirection> = {};
+  /** Trend gating ON/OFF. Default OFF (advisory only) until we trust it. */
+  private trendGatingEnabled = false;
 
   // ── Strategy × Symbol whitelist ──────────────────────────────────────────
   // Backtest-driven: only run a strategy on symbols where it has shown
@@ -941,6 +950,19 @@ export class TradingAgent {
    * - If entry exists but empty: strategy is fully disabled
    * - Otherwise: only listed symbols allowed
    */
+  /** Current trend state per symbol (computed each tick). */
+  getCurrentTrends(): Record<string, TrendState> {
+    return { ...this.currentTrends };
+  }
+
+  /** Toggle trend-gating: when true, strategies' entry signals are filtered
+   *  by strategyWantsFire(name, trend). Default is false (advisory only). */
+  setTrendGating(enabled: boolean): void {
+    this.trendGatingEnabled = enabled;
+    console.log(`[TREND] gating ${enabled ? 'ENABLED' : 'DISABLED'}`);
+  }
+  isTrendGatingEnabled(): boolean { return this.trendGatingEnabled; }
+
   isWhitelisted(stratName: string, symbol: string): boolean {
     const list = this.strategySymbolWhitelist[stratName];
     if (list === undefined) return true;             // no entry → allow all
@@ -1247,6 +1269,21 @@ export class TradingAgent {
     this.currentRegime = regimeResult.regime;
     this.currentRegimeResult = regimeResult;
 
+    // Multi-timeframe trend agent — uses historical.db (1h/4h/1d bars)
+    this.currentTrends = computeTrendsForAll(universe.map((s) => s.symbol));
+    // Detect direction flips and fire Telegram alerts for each
+    for (const [sym, t] of Object.entries(this.currentTrends)) {
+      const prior = this.lastTrendDirection[sym];
+      if (prior && prior !== t.direction) {
+        const arrow = t.direction === 'up' ? '▲' : t.direction === 'down' ? '▼' : '◆';
+        const msg = `${arrow} *Trend flip*: ${sym} ${prior} → *${t.direction}* (strength ${t.strength}, ${t.phase}, conf ${(t.confidence * 100).toFixed(0)}%)`;
+        // Fire and forget — never block the trading loop on a notification
+        void sendTelegramMessage(msg).catch(() => {});
+        console.log(`[TREND] ${sym}: ${prior} → ${t.direction} (str=${t.strength} phase=${t.phase})`);
+      }
+      this.lastTrendDirection[sym] = t.direction;
+    }
+
     const enabledStrategies = this.cfg.strategies;
 
     // First pass: run signal strategies (mean_rev, breakout) per-symbol;
@@ -1274,6 +1311,17 @@ export class TradingAgent {
         // Backtest-driven whitelist: don't run a strategy on a symbol where
         // it has shown negative edge in historical testing.
         if (!this.isWhitelisted(stratName, sym.symbol)) continue;
+
+        // Optional trend gate (default OFF — flip via POST /trend/gating).
+        // When enabled, each strategy declares its own trend preference in
+        // strategyWantsFire(). Skips entries when the trend is unfavorable.
+        if (this.trendGatingEnabled) {
+          const t = this.currentTrends[sym.symbol] ?? null;
+          if (!strategyWantsFire(stratName, t)) {
+            // Don't log every tick — it'd flood. Only log direction flips (above).
+            continue;
+          }
+        }
 
         // Per (strategy, mint) open-position lookup — checks BOTH spot and perp
         const openSpot = this.positionManager.getOpenPositions()
